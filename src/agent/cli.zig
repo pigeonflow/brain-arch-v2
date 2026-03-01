@@ -299,6 +299,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 std.debug.print("  [thalamus] {s} ({d}ms) confidence={d:.2}\n", .{ cls.class.toSlice(), elapsed, cls.confidence });
 
                 if (cls.reflex_response) |reflex| {
+                    if (cls.class == .reflex and cls.confidence >= 0.90) {
+                        // Short-circuit: skip full agent turn for reflexes
+                        std.debug.print("  [thalamus] SHORT-CIRCUIT reflex: {s}\n", .{reflex});
+                        try w.print("{s}\n", .{reflex});
+                        try w.flush();
+                        return;
+                    }
                     std.debug.print("  [thalamus] reflex: {s}\n", .{reflex});
                     // Print reflex immediately
                     try w.print("{s}\n", .{reflex});
@@ -446,6 +453,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 try w.print("[thalamus] {s} ({d}ms)\n", .{ cls.class.toSlice(), elapsed });
 
                 if (cls.reflex_response) |reflex| {
+                    if (cls.class == .reflex and cls.confidence >= 0.90) {
+                        try w.print("[thalamus] SHORT-CIRCUIT ({d}ms)\n{s}\n\n", .{ elapsed, reflex });
+                        try w.flush();
+                        continue;
+                    }
                     try w.print("{s}\n", .{reflex});
                     try w.flush();
                 }
