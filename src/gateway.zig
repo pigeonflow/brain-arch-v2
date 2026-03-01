@@ -27,6 +27,7 @@ const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
 const ras_mod = @import("ras.zig");
+const brain_events_mod = @import("brain_events.zig");
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -519,6 +520,29 @@ pub fn validateBearerToken(token: []const u8, paired_tokens: []const []const u8)
 
 /// Extract the value of a named header from raw HTTP bytes.
 /// Searches for "Name: value\r\n" (case-insensitive name match).
+/// SSE worker thread — streams brain events to a single client.
+fn sseWorker(stream: std.net.Stream) void {
+    defer stream.close();
+    const sse_header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n";
+    _ = stream.write(sse_header) catch return;
+
+    var sub = brain_events_mod.Subscriber.init();
+    brain_events_mod.subscribe(&sub);
+    defer brain_events_mod.unsubscribe(&sub);
+
+    while (true) {
+        if (sub.poll(2_000_000_000)) |ev| {
+            var sse_buf: [4096]u8 = undefined;
+            const sse_line = brain_events_mod.formatSSE(&sse_buf, ev);
+            if (sse_line.len > 0) {
+                _ = stream.write(sse_line) catch return;
+            }
+        } else {
+            _ = stream.write(": keepalive\n\n") catch return;
+        }
+    }
+}
+
 pub fn extractHeader(raw: []const u8, name: []const u8) ?[]const u8 {
     // Skip past the first line (request line)
     var pos: usize = 0;
@@ -2455,7 +2479,8 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     // Accept loop — read raw HTTP from TCP connections
     while (true) {
         var conn = server.accept() catch continue;
-        defer conn.stream.close();
+        var conn_owned_by_thread = false;
+        defer if (!conn_owned_by_thread) conn.stream.close();
 
         // Per-request arena — all request-scoped allocations freed in one shot
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -2476,13 +2501,15 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
         const target = parts.next() orelse continue;
 
         // Simple routing — control endpoints + descriptor-driven channel webhooks.
-        const ControlRoute = enum { health, ready, webhook, pair, chat };
+        const ControlRoute = enum { health, ready, webhook, pair, chat, brain_events, brain_dashboard };
         const control_route_map = std.StaticStringMap(ControlRoute).initComptime(.{
             .{ "/health", .health },
             .{ "/ready", .ready },
             .{ "/webhook", .webhook },
             .{ "/pair", .pair },
             .{ "/chat", .chat },
+            .{ "/brain/events", .brain_events },
+            .{ "/brain/dashboard", .brain_dashboard },
         });
         const base_path = if (std.mem.indexOfScalar(u8, target, '?')) |qi| target[0..qi] else target;
         const is_post = std.mem.eql(u8, method_str, "POST");
@@ -2673,6 +2700,27 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                         response_body = "{\"error\":\"pairing unavailable\"}";
                     }
                 }
+            },
+            .brain_dashboard => {
+                // Serve the brain dashboard HTML
+                const dashboard_html = @embedFile("brain_dashboard.html");
+                var dash_resp_buf: [256]u8 = undefined;
+                const dash_header = std.fmt.bufPrint(&dash_resp_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{dashboard_html.len}) catch continue;
+                _ = conn.stream.write(dash_header) catch continue;
+                _ = conn.stream.write(dashboard_html) catch continue;
+                continue;
+            },
+            .brain_events => {
+                // SSE endpoint — must run in its own thread to not block the accept loop
+                const stream_conn = conn.stream;
+                const sse_thread = std.Thread.spawn(.{ .stack_size = 64 * 1024 }, sseWorker, .{stream_conn}) catch {
+                    response_status = "500 Internal Server Error";
+                    response_body = "{\"error\":\"failed to spawn SSE thread\"}";
+                    continue;
+                };
+                sse_thread.detach();
+                conn_owned_by_thread = true;
+                continue;
             },
         } else {
             response_status = "404 Not Found";

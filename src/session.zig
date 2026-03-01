@@ -18,6 +18,7 @@ const Provider = providers.Provider;
 const memory_mod = @import("memory/root.zig");
 const Memory = memory_mod.Memory;
 const observability = @import("observability.zig");
+const brain_events = @import("brain_events.zig");
 const Observer = observability.Observer;
 const tools_mod = @import("tools/root.zig");
 const Tool = tools_mod.Tool;
@@ -313,8 +314,17 @@ pub const SessionManager = struct {
                 if (classification) |*cls| {
                     defer cls.deinit(self.allocator);
 
+                    // Emit brain event
+                    var ev_buf: [512]u8 = undefined;
+                    const ev_data = std.fmt.bufPrint(&ev_buf, "{{\"class\":\"{s}\",\"confidence\":{d:.2}}}", .{
+                        @tagName(cls.class),
+                        cls.confidence,
+                    }) catch "";
+                    brain_events.emit(.thalamus_classify, ev_data);
+
                     // Send reflex response immediately if available
                     if (cls.reflex_response) |reflex| {
+                        brain_events.emit(.thalamus_reflex, "{}");
                         if (stream_sink) |sink| {
                             sink.callback(sink.ctx, .{ .stage = .chunk, .text = reflex });
                         }
@@ -331,11 +341,13 @@ pub const SessionManager = struct {
         // ── RAS: Mark agent as busy ──────────────────────────────────
         if (self.ras) |*ras| {
             ras.agentBusy();
+            brain_events.emit(.ras_busy, "{}");
             session.agent.interrupt_check = rasInterruptBridge;
             session.agent.interrupt_check_ctx = @ptrCast(ras);
         }
         defer if (self.ras) |*ras| {
             const queued = ras.agentIdle();
+            brain_events.emit(.ras_idle, "{}");
             // TODO: Process queued messages in next turn
             self.allocator.free(queued);
         };
@@ -346,7 +358,9 @@ pub const SessionManager = struct {
         } else content;
         defer if (thalamus_header != null) self.allocator.free(effective_content);
 
+        brain_events.emit(.broca_start, "{}");
         const response = try session.agent.turn(effective_content);
+        brain_events.emit(.broca_done, "{}");
         session.turn_count += 1;
         session.last_active = std.time.timestamp();
 

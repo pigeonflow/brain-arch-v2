@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🧠 Brain-Arch v2 — Live Dashboard</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0f; color: #e0e0e0; font-family: 'JetBrains Mono', 'SF Mono', monospace; overflow: hidden; }
+#canvas-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 0; }
+#hud { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
+#title { position: absolute; top: 20px; left: 24px; font-size: 14px; opacity: 0.6; letter-spacing: 2px; text-transform: uppercase; }
+#title span { color: #7c5cff; }
+#status { position: absolute; top: 20px; right: 24px; font-size: 12px; }
+#status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #333; }
+#status .dot.connected { background: #4ade80; box-shadow: 0 0 8px #4ade80; }
+#event-log { position: absolute; bottom: 20px; left: 24px; width: 420px; max-height: 300px; overflow: hidden; font-size: 11px; line-height: 1.6; opacity: 0.8; }
+#event-log .entry { animation: fadeIn 0.3s ease; }
+#event-log .entry .time { color: #555; margin-right: 8px; }
+#event-log .entry .kind { font-weight: bold; margin-right: 6px; }
+.kind-thalamus { color: #f59e0b; }
+.kind-ras { color: #ef4444; }
+.kind-broca { color: #3b82f6; }
+#regions { position: absolute; bottom: 20px; right: 24px; display: flex; gap: 12px; }
+.region-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 12px 16px; min-width: 120px; text-align: center; transition: all 0.3s ease; }
+.region-card.active { border-color: var(--color); box-shadow: 0 0 20px var(--glow); }
+.region-card .name { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.5; margin-bottom: 4px; }
+.region-card .state { font-size: 13px; font-weight: bold; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+</style>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="hud">
+  <div id="title">Brain-Arch <span>v2</span> — Live</div>
+  <div id="status"><span class="dot" id="conn-dot"></span><span id="conn-text">connecting...</span></div>
+  <div id="event-log"></div>
+  <div id="regions">
+    <div class="region-card" id="r-thalamus" style="--color: #f59e0b; --glow: rgba(245,158,11,0.3);">
+      <div class="name">Thalamus</div><div class="state" id="s-thalamus">idle</div>
+    </div>
+    <div class="region-card" id="r-ras" style="--color: #ef4444; --glow: rgba(239,68,68,0.3);">
+      <div class="name">RAS</div><div class="state" id="s-ras">monitoring</div>
+    </div>
+    <div class="region-card" id="r-broca" style="--color: #3b82f6; --glow: rgba(59,130,246,0.3);">
+      <div class="name">Broca's</div><div class="state" id="s-broca">idle</div>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ── Three.js Brain Visualization ──
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(0, 0.5, 5);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+container.appendChild(renderer.domElement);
+
+// Regions as glowing spheres
+const regions = {};
+const regionDefs = [
+  { id: 'thalamus', pos: [0, 0, 0], color: 0xf59e0b, size: 0.4, label: 'Thalamus' },
+  { id: 'ras', pos: [-1.5, -0.8, 0.3], color: 0xef4444, size: 0.25, label: 'RAS' },
+  { id: 'broca', pos: [1.2, 0.6, -0.2], color: 0x3b82f6, size: 0.35, label: "Broca's" },
+  { id: 'prefrontal', pos: [0, 1.5, -0.5], color: 0x7c5cff, size: 0.3, label: 'Prefrontal' },
+  { id: 'hippocampus', pos: [-1.2, 0.8, 0.5], color: 0x10b981, size: 0.22, label: 'Hippocampus' },
+  { id: 'amygdala', pos: [1.5, -0.6, 0.4], color: 0xf43f5e, size: 0.2, label: 'Amygdala' },
+];
+
+regionDefs.forEach(def => {
+  const geo = new THREE.SphereGeometry(def.size, 32, 32);
+  const mat = new THREE.MeshBasicMaterial({
+    color: def.color, transparent: true, opacity: 0.15, wireframe: false
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(...def.pos);
+  scene.add(mesh);
+
+  // Glow ring
+  const ringGeo = new THREE.RingGeometry(def.size * 1.1, def.size * 1.3, 64);
+  const ringMat = new THREE.MeshBasicMaterial({
+    color: def.color, transparent: true, opacity: 0.05, side: THREE.DoubleSide
+  });
+  const ring = new THREE.Mesh(ringGeo, ringMat);
+  ring.position.set(...def.pos);
+  ring.lookAt(camera.position);
+  scene.add(ring);
+
+  regions[def.id] = { mesh, ring, mat, ringMat, baseOpacity: 0.15, targetOpacity: 0.15 };
+});
+
+// Neural connections (lines between regions)
+const connections = [
+  ['thalamus', 'broca'], ['thalamus', 'ras'], ['thalamus', 'prefrontal'],
+  ['broca', 'hippocampus'], ['broca', 'amygdala'], ['ras', 'amygdala'],
+];
+connections.forEach(([a, b]) => {
+  const pA = regionDefs.find(r => r.id === a).pos;
+  const pB = regionDefs.find(r => r.id === b).pos;
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(...pA), new THREE.Vector3(...pB)
+  ]);
+  const mat = new THREE.LineBasicMaterial({ color: 0x222233, transparent: true, opacity: 0.3 });
+  scene.add(new THREE.Line(geo, mat));
+});
+
+// Particle field (background neurons)
+const particleCount = 800;
+const particleGeo = new THREE.BufferGeometry();
+const positions = new Float32Array(particleCount * 3);
+for (let i = 0; i < particleCount * 3; i++) positions[i] = (Math.random() - 0.5) * 12;
+particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+const particleMat = new THREE.PointsMaterial({ color: 0x333355, size: 0.02, transparent: true, opacity: 0.5 });
+scene.add(new THREE.Points(particleGeo, particleMat));
+
+// Animation
+let time = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  time += 0.005;
+
+  // Gentle camera orbit
+  camera.position.x = Math.sin(time * 0.3) * 0.5;
+  camera.position.y = 0.5 + Math.sin(time * 0.2) * 0.2;
+  camera.lookAt(0, 0.2, 0);
+
+  // Smooth opacity transitions
+  for (const [id, r] of Object.entries(regions)) {
+    r.mat.opacity += (r.targetOpacity - r.mat.opacity) * 0.08;
+    r.ringMat.opacity = r.mat.opacity * 0.4;
+    r.ring.lookAt(camera.position);
+    // Gentle breathe for idle regions
+    if (r.targetOpacity <= r.baseOpacity) {
+      r.mesh.scale.setScalar(1 + Math.sin(time * 2 + regionDefs.findIndex(d => d.id === id)) * 0.02);
+    }
+  }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ── Activate region (flash + decay) ──
+function activateRegion(id, duration = 2000) {
+  const r = regions[id];
+  if (!r) return;
+  r.targetOpacity = 0.9;
+  r.mesh.scale.setScalar(1.15);
+  const card = document.getElementById('r-' + id);
+  if (card) card.classList.add('active');
+  setTimeout(() => {
+    r.targetOpacity = r.baseOpacity;
+    r.mesh.scale.setScalar(1);
+    if (card) card.classList.remove('active');
+  }, duration);
+}
+
+// ── Synapse flash (line pulse) ──
+function flashConnection(fromId, toId) {
+  const pA = regionDefs.find(r => r.id === fromId)?.pos;
+  const pB = regionDefs.find(r => r.id === toId)?.pos;
+  if (!pA || !pB) return;
+  const geo = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(...pA), new THREE.Vector3(...pB)
+  ]);
+  const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 });
+  const line = new THREE.Line(geo, mat);
+  scene.add(line);
+  const start = performance.now();
+  function fade() {
+    const elapsed = performance.now() - start;
+    mat.opacity = Math.max(0, 0.8 - elapsed / 500);
+    if (mat.opacity > 0) requestAnimationFrame(fade);
+    else { scene.remove(line); geo.dispose(); mat.dispose(); }
+  }
+  requestAnimationFrame(fade);
+}
+
+// ── Event Log ──
+const logEl = document.getElementById('event-log');
+const MAX_LOG = 25;
+function logEvent(kind, detail) {
+  const kindClass = kind.startsWith('thalamus') ? 'thalamus' : kind.startsWith('ras') ? 'ras' : 'broca';
+  const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const entry = document.createElement('div');
+  entry.className = 'entry';
+  entry.innerHTML = `<span class="time">${now}</span><span class="kind kind-${kindClass}">${kind}</span>${detail}`;
+  logEl.appendChild(entry);
+  while (logEl.children.length > MAX_LOG) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ── SSE Connection ──
+const dot = document.getElementById('conn-dot');
+const connText = document.getElementById('conn-text');
+
+function connect() {
+  const port = location.port || '21789';
+  const host = location.hostname || 'localhost';
+  const url = `http://${host}:${port}/brain/events`;
+  const es = new EventSource(url);
+
+  es.onopen = () => {
+    dot.classList.add('connected');
+    connText.textContent = 'streaming';
+  };
+  es.onerror = () => {
+    dot.classList.remove('connected');
+    connText.textContent = 'reconnecting...';
+  };
+
+  // Route events to visualizations
+  const handlers = {
+    thalamus_classify(d) {
+      activateRegion('thalamus', 1500);
+      document.getElementById('s-thalamus').textContent = d.data?.class || 'classifying';
+      setTimeout(() => document.getElementById('s-thalamus').textContent = 'idle', 2000);
+      logEvent('thalamus', `class=<b>${d.data?.class || '?'}</b> conf=${d.data?.confidence || '?'}`);
+      flashConnection('thalamus', 'broca');
+    },
+    thalamus_reflex(d) {
+      activateRegion('thalamus', 800);
+      logEvent('thalamus', '⚡ reflex short-circuit');
+    },
+    ras_busy(d) {
+      activateRegion('ras', 30000);
+      document.getElementById('s-ras').textContent = 'active';
+      logEvent('ras', 'agent busy — monitoring');
+    },
+    ras_idle(d) {
+      document.getElementById('s-ras').textContent = 'monitoring';
+      logEvent('ras', 'agent idle');
+    },
+    ras_interrupt(d) {
+      activateRegion('ras', 3000);
+      activateRegion('amygdala', 2000);
+      flashConnection('ras', 'amygdala');
+      document.getElementById('s-ras').textContent = '🚨 INTERRUPT';
+      logEvent('ras', '🚨 <b>INTERRUPT FIRED</b>');
+    },
+    broca_start(d) {
+      activateRegion('broca', 15000);
+      document.getElementById('s-broca').textContent = 'thinking';
+      logEvent('broca', 'turn started');
+      flashConnection('thalamus', 'broca');
+    },
+    broca_done(d) {
+      document.getElementById('s-broca').textContent = 'idle';
+      logEvent('broca', 'turn complete');
+    },
+    broca_tool_call(d) {
+      activateRegion('broca', 2000);
+      logEvent('broca', '🔧 tool call');
+    },
+    broca_tool_result(d) {
+      logEvent('broca', '📋 tool result');
+    },
+  };
+
+  // Listen for all event types
+  Object.keys(handlers).forEach(type => {
+    es.addEventListener(type, (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        handlers[type](data);
+      } catch (err) {
+        handlers[type]({});
+      }
+    });
+  });
+
+  // Generic fallback
+  es.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      const kind = data.kind || 'unknown';
+      if (handlers[kind]) handlers[kind](data);
+    } catch {}
+  };
+}
+
+connect();
+</script>
+</body>
+</html>
