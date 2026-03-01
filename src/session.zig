@@ -387,7 +387,7 @@ pub const SessionManager = struct {
         };
 
         // Inject thalamus header into the message if available
-        const effective_content = if (thalamus_header) |header| blk: {
+        var effective_content: []const u8 = if (thalamus_header) |header| blk: {
             break :blk try std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ header, content });
         } else content;
         defer if (thalamus_header != null) self.allocator.free(effective_content);
@@ -406,6 +406,23 @@ pub const SessionManager = struct {
                         return block_msg;
                     }
                 }
+            }
+        }
+
+        // ── Hippocampus: Memory retrieval (inject context before Broca's turn) ──
+        var memory_context: ?[]const u8 = null;
+        if (thalamus_class != .reflex) {
+            if (self.hippocampus) |*hippo| {
+                memory_context = hippo.retrieve(content);
+            }
+        }
+
+        // If we got memories, prepend them to the effective content
+        if (memory_context) |mem_ctx| {
+            const enriched = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ mem_ctx, effective_content }) catch effective_content;
+            if (enriched.ptr != effective_content.ptr) {
+                self.allocator.free(mem_ctx);
+                effective_content = enriched;
             }
         }
 

@@ -18,3 +18,4 @@ result
 .worktrees
 nullclaw.json
 workspace/
+bin/
