@@ -1637,6 +1637,16 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     // Initialize session manager
     var session_mgr = yc.session.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
     session_mgr.policy = &sec_policy;
+
+    // Brain-arch: Enable Thalamus if configured
+    std.debug.print("  [brain-arch] checking thalamus config...\n", .{});
+    if (config.getBrainArchThalamus()) |thalamus_model| {
+        std.debug.print("  [brain-arch] Thalamus model: {s}\n", .{thalamus_model});
+        session_mgr.enableThalamus(thalamus_model);
+        session_mgr.enableRas();
+    } else {
+        std.debug.print("  [brain-arch] Thalamus not configured\n", .{});
+    }
     if (mem_rt) |*rt| {
         session_mgr.mem_rt = rt;
     }
@@ -1959,6 +1969,12 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
 
     var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
     session_mgr.policy = &sec_policy;
+
+    // Brain-arch: Enable Thalamus if configured
+    if (config.getBrainArchThalamus()) |thalamus_model| {
+        session_mgr.enableThalamus(thalamus_model);
+        session_mgr.enableRas();
+    }
     if (mem_rt) |*rt| {
         session_mgr.mem_rt = rt;
     }

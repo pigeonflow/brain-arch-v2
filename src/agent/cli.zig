@@ -21,6 +21,7 @@ const security = @import("../security/policy.zig");
 const auth_mod = @import("../auth.zig");
 const onboard = @import("../onboard.zig");
 const streaming = @import("../streaming.zig");
+const thalamus_mod = @import("../thalamus.zig");
 
 const Agent = @import("root.zig").Agent;
 
@@ -243,6 +244,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     // Provider interface from runtime bundle (includes retries/fallbacks).
     const provider_i: Provider = runtime_provider.provider();
 
+    // Brain-arch: Initialize Thalamus if configured
+    var thalamus: ?thalamus_mod.Thalamus = null;
+    if (cfg.getBrainArchThalamus()) |thalamus_model| {
+        // We need a mutable copy of provider_i for the pointer
+        thalamus = thalamus_mod.Thalamus.init(allocator, @constCast(&provider_i), thalamus_model, true);
+        std.debug.print("  [brain-arch] Thalamus: {s}\n", .{thalamus_model});
+    }
+
     const supports_streaming = provider_i.supportsStreaming();
 
     // Single message mode: nullclaw agent -m "hello"
@@ -276,7 +285,37 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             agent.stream_ctx = @ptrCast(&stream_ctx);
         }
 
-        const response = agent.turn(message) catch |err| {
+        // Brain-arch: Thalamus pre-classification
+        var effective_message = message;
+        var thalamus_alloc: ?[]const u8 = null;
+        defer if (thalamus_alloc) |ta| allocator.free(ta);
+
+        if (thalamus) |*thal| {
+            const timer = std.time.milliTimestamp();
+            if (thal.classify(message)) |cls_val| {
+                var cls = cls_val;
+                defer cls.deinit(allocator);
+                const elapsed = std.time.milliTimestamp() - timer;
+                std.debug.print("  [thalamus] {s} ({d}ms) confidence={d:.2}\n", .{ cls.class.toSlice(), elapsed, cls.confidence });
+
+                if (cls.reflex_response) |reflex| {
+                    std.debug.print("  [thalamus] reflex: {s}\n", .{reflex});
+                    // Print reflex immediately
+                    try w.print("{s}\n", .{reflex});
+                    try w.flush();
+                }
+
+                if (thal.formatHeader(&cls)) |header| {
+                    thalamus_alloc = std.fmt.allocPrint(allocator, "{s}\n{s}", .{ header, message }) catch null;
+                    if (thalamus_alloc) |ta| effective_message = ta;
+                    allocator.free(header);
+                } else |_| {}
+            } else |err| {
+                std.debug.print("  [thalamus] error: {s}\n", .{@errorName(err)});
+            }
+        }
+
+        const response = agent.turn(effective_message) catch |err| {
             if (err == error.ProviderDoesNotSupportVision) {
                 try w.print("Error: The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.\n", .{});
                 try w.flush();
@@ -393,7 +432,36 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         // Append to history
         repl_history.append(allocator, allocator.dupe(u8, line) catch continue) catch {};
 
-        const response = agent.turn(line) catch |err| {
+        // Brain-arch: Thalamus pre-classification
+        var effective_line: []const u8 = line;
+        var thal_alloc: ?[]const u8 = null;
+        defer if (thal_alloc) |ta| allocator.free(ta);
+
+        if (thalamus) |*thal| {
+            const timer = std.time.milliTimestamp();
+            if (thal.classify(line)) |cls_val| {
+                var cls = cls_val;
+                defer cls.deinit(allocator);
+                const elapsed = std.time.milliTimestamp() - timer;
+                try w.print("[thalamus] {s} ({d}ms)\n", .{ cls.class.toSlice(), elapsed });
+
+                if (cls.reflex_response) |reflex| {
+                    try w.print("{s}\n", .{reflex});
+                    try w.flush();
+                }
+
+                if (thal.formatHeader(&cls)) |header| {
+                    thal_alloc = std.fmt.allocPrint(allocator, "{s}\n{s}", .{ header, line }) catch null;
+                    if (thal_alloc) |ta| effective_line = ta;
+                    allocator.free(header);
+                } else |_| {}
+            } else |err| {
+                try w.print("[thalamus] error: {s}\n", .{@errorName(err)});
+            }
+            try w.flush();
+        }
+
+        const response = agent.turn(effective_line) catch |err| {
             if (err == error.ProviderDoesNotSupportVision) {
                 try w.print("Error: The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.\n", .{});
             } else if (err == error.AllProvidersFailed) {

@@ -143,6 +143,9 @@ pub const Config = struct {
     tools: ToolsConfig = .{},
     session: SessionConfig = .{},
 
+    // Brain-arch extensions
+    brain_arch_thalamus_model: ?[]const u8 = null,
+
     // Convenience aliases for backward-compat flat access used by other modules.
     // These are set during load() to mirror nested values.
     temperature: f64 = 0.7,
@@ -170,6 +173,13 @@ pub const Config = struct {
     /// Convenience: API key for the default_provider.
     pub fn defaultProviderKey(self: *const Config) ?[]const u8 {
         return self.getProviderKey(self.default_provider);
+    }
+
+    /// Get the Thalamus model name if brain-arch is enabled.
+    /// Checks config field first, then BRAIN_ARCH_THALAMUS env var.
+    pub fn getBrainArchThalamus(self: *const Config) ?[]const u8 {
+        if (self.brain_arch_thalamus_model) |m| return m;
+        return std.posix.getenv("BRAIN_ARCH_THALAMUS");
     }
 
     /// Look up a provider's base_url from the providers list.

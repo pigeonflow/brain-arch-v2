@@ -105,6 +105,19 @@ pub const SessionManager = struct {
         };
     }
 
+    /// Enable the Thalamus pre-turn classifier.
+    /// Uses the same provider as the main agent but with a fast/cheap model.
+    pub fn enableThalamus(self: *SessionManager, model_name: []const u8) void {
+        self.thalamus = Thalamus.init(self.allocator, &self.provider, model_name, true);
+        log.info("thalamus enabled: model={s}", .{model_name});
+    }
+
+    /// Enable the RAS (Reticular Activating System) for interrupt signaling.
+    pub fn enableRas(self: *SessionManager) void {
+        self.ras = Ras.init(self.allocator);
+        log.info("ras enabled", .{});
+    }
+
     pub fn deinit(self: *SessionManager) void {
         var it = self.sessions.iterator();
         while (it.next()) |entry| {
@@ -274,7 +287,7 @@ pub const SessionManager = struct {
 
         if (self.thalamus) |*thal| {
             if (thal.enabled) {
-                var classification = thal.classify(content) catch |err| blk: {
+                                var classification: ?thalamus_mod.Classification = thal.classify(content) catch |err| blk: {
                     log.warn("thalamus classify error: {s}", .{@errorName(err)});
                     break :blk null;
                 };

@@ -16,3 +16,5 @@ reference/
 result
 .direnv/
 .worktrees
+nullclaw.json
+workspace/
