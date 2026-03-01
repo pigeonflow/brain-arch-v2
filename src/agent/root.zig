@@ -284,6 +284,12 @@ pub const Agent = struct {
     stream_callback: ?providers.StreamCallback = null,
     /// Context pointer passed to stream_callback.
     stream_ctx: ?*anyopaque = null,
+
+    /// RAS interrupt check callback. Called between tool iterations.
+    /// Returns an interrupt message if the agent should stop current work, or null.
+    /// The agent owns the returned slice and must free it.
+    interrupt_check: ?*const fn () ?[]const u8 = null,
+
     /// Conversation context for the current turn (Signal-specific for now).
     conversation_context: ?prompt.ConversationContext = null,
 
@@ -787,6 +793,29 @@ pub const Agent = struct {
         while (iteration < self.max_tool_iterations) : (iteration += 1) {
             _ = iter_arena.reset(.retain_capacity);
             const arena = iter_arena.allocator();
+
+            // ── RAS interrupt check ──────────────────────────────────
+            // Between each tool iteration, check if a high-priority
+            // message arrived (correction, "stop", etc). If so, inject
+            // it as a new user message and let the agent redirect.
+            if (iteration > 0) {
+                if (self.interrupt_check) |check_fn| {
+                    if (check_fn()) |interrupt_msg| {
+                        defer self.allocator.free(interrupt_msg);
+                        log.info("RAS interrupt received, injecting: {s}", .{interrupt_msg[0..@min(interrupt_msg.len, 80)]});
+
+                        // Inject as a new user message with interrupt marker
+                        const prefixed = try std.fmt.allocPrint(self.allocator, "[RAS INTERRUPT] {s}", .{interrupt_msg});
+                        try self.history.append(self.allocator, .{
+                            .role = .user,
+                            .content = prefixed,
+                        });
+                        // Continue the loop — the LLM will see the interrupt
+                        // and should redirect its behavior
+                        continue;
+                    }
+                }
+            }
 
             // Build messages slice for provider (arena-owned; freed at end of iteration)
             const messages = try self.buildProviderMessages(arena);

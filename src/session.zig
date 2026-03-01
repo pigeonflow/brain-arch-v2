@@ -23,6 +23,10 @@ const tools_mod = @import("tools/root.zig");
 const Tool = tools_mod.Tool;
 const SecurityPolicy = @import("security/policy.zig").SecurityPolicy;
 const streaming = @import("streaming.zig");
+const thalamus_mod = @import("thalamus.zig");
+const Thalamus = thalamus_mod.Thalamus;
+const ras_mod = @import("ras.zig");
+const Ras = ras_mod.Ras;
 const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
 
@@ -67,6 +71,10 @@ pub const SessionManager = struct {
     mem_rt: ?*memory_mod.MemoryRuntime = null,
     observer: Observer,
     policy: ?*const SecurityPolicy = null,
+
+    /// Brain-arch extensions
+    thalamus: ?Thalamus = null,
+    ras: ?Ras = null,
 
     mutex: std.Thread.Mutex,
     sessions: std.StringHashMapUnmanaged(*Session),
@@ -257,7 +265,53 @@ pub const SessionManager = struct {
             session.agent.stream_ctx = null;
         }
 
-        const response = try session.agent.turn(content);
+        // ── Thalamus: Pre-turn classification ──────────────────────────
+        // Classify the input before the full agent turn. If the thalamus
+        // produces a reflex response, send it immediately via the stream
+        // sink (sub-500ms), then continue to the full turn.
+        var thalamus_header: ?[]const u8 = null;
+        defer if (thalamus_header) |h| self.allocator.free(h);
+
+        if (self.thalamus) |*thal| {
+            if (thal.enabled) {
+                var classification = thal.classify(content) catch |err| blk: {
+                    log.warn("thalamus classify error: {s}", .{@errorName(err)});
+                    break :blk null;
+                };
+
+                if (classification) |*cls| {
+                    defer cls.deinit(self.allocator);
+
+                    // Send reflex response immediately if available
+                    if (cls.reflex_response) |reflex| {
+                        if (stream_sink) |sink| {
+                            sink.callback(sink.ctx, .{ .stage = .chunk, .text = reflex });
+                        }
+                        // If reflex-only and high confidence, we could skip the full turn.
+                        // For now, always continue to the agent for potential enrichment.
+                    }
+
+                    // Format classification header for the agent
+                    thalamus_header = thal.formatHeader(cls) catch null;
+                }
+            }
+        }
+
+        // ── RAS: Mark agent as busy ──────────────────────────────────
+        if (self.ras) |*ras| ras.agentBusy();
+        defer if (self.ras) |*ras| {
+            const queued = ras.agentIdle();
+            // TODO: Process queued messages in next turn
+            self.allocator.free(queued);
+        };
+
+        // Inject thalamus header into the message if available
+        const effective_content = if (thalamus_header) |header| blk: {
+            break :blk try std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ header, content });
+        } else content;
+        defer if (thalamus_header != null) self.allocator.free(effective_content);
+
+        const response = try session.agent.turn(effective_content);
         session.turn_count += 1;
         session.last_active = std.time.timestamp();
 
