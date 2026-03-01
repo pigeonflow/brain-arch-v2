@@ -193,12 +193,13 @@ pub const Hippocampus = struct {
         , .{ mem_type, text, emb_buf[0..emb_pos], priority }) catch return error.BufferTooSmall;
 
         // Shell out to clawmem
-        var child = std.process.Child.init(.{
-            .argv = &.{ self.clawmem_bin, "--db", self.clawmem_db, "upsert", "--agent", self.agent_id },
-            .stdin_behavior = .pipe,
-            .stdout_behavior = .pipe,
-            .stderr_behavior = .pipe,
-        }, self.allocator);
+        var child = std.process.Child.init(
+            &[_][]const u8{ self.clawmem_bin, "--db", self.clawmem_db, "upsert", "--agent", self.agent_id },
+            self.allocator,
+        );
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
         child.spawn() catch return error.SpawnFailed;
 
@@ -264,12 +265,13 @@ pub const Hippocampus = struct {
             \\{{"query_embedding":{s},"k":{d}}}
         , .{ emb_buf[0..emb_pos], k }) catch return error.BufferTooSmall;
 
-        var child = std.process.Child.init(.{
-            .argv = &.{ self.clawmem_bin, "--db", self.clawmem_db, "search", "--agent", self.agent_id },
-            .stdin_behavior = .pipe,
-            .stdout_behavior = .pipe,
-            .stderr_behavior = .pipe,
-        }, self.allocator);
+        var child = std.process.Child.init(
+            &[_][]const u8{ self.clawmem_bin, "--db", self.clawmem_db, "search", "--agent", self.agent_id },
+            self.allocator,
+        );
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
 
         child.spawn() catch return error.SpawnFailed;
 
@@ -279,24 +281,26 @@ pub const Hippocampus = struct {
             child.stdin = null;
         }
 
-        var stdout_buf = std.ArrayList(u8).init(self.allocator);
+        var stdout_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer stdout_buf.deinit(self.allocator);
         if (child.stdout) |stdout| {
             while (true) {
                 var buf: [4096]u8 = undefined;
                 const n = stdout.read(&buf) catch break;
                 if (n == 0) break;
-                stdout_buf.appendSlice(buf[0..n]) catch break;
+                stdout_buf.appendSlice(self.allocator, buf[0..n]) catch break;
             }
         }
 
         _ = child.wait() catch {};
-        return stdout_buf.toOwnedSlice() catch return error.OutOfMemory;
+        return stdout_buf.toOwnedSlice(self.allocator) catch return error.OutOfMemory;
     }
 
     fn formatMemories(self: *Hippocampus, results_json: []const u8) ![]const u8 {
         // Extract "content" fields from results JSON and format as context block
-        var output = std.ArrayList(u8).init(self.allocator);
-        try output.appendSlice("[Recalled memories]\n");
+        var output: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer output.deinit(self.allocator);
+        try output.appendSlice(self.allocator, "[Recalled memories]\n");
 
         var pos: usize = 0;
         var count: usize = 0;
@@ -306,20 +310,20 @@ pub const Hippocampus = struct {
             const val_end = std.mem.indexOfPos(u8, results_json, val_start, "\"") orelse break;
             const content = results_json[val_start..val_end];
             if (content.len > 0 and !std.mem.eql(u8, content, "null")) {
-                try output.appendSlice("- ");
-                try output.appendSlice(content);
-                try output.appendSlice("\n");
+                try output.appendSlice(self.allocator, "- ");
+                try output.appendSlice(self.allocator, content);
+                try output.appendSlice(self.allocator, "\n");
                 count += 1;
             }
             pos = val_end + 1;
         }
 
         if (count == 0) {
-            output.deinit();
+            output.deinit(self.allocator);
             return error.NoResults;
         }
 
-        return output.toOwnedSlice();
+        return output.toOwnedSlice(self.allocator);
     }
 
     // ---- Markdown fallback (human-readable log) ----
@@ -375,7 +379,7 @@ pub const Hippocampus = struct {
                 h *%= 0x100000001b3;
             }
             // Map to [-1, 1]
-            slot.* = @as(f32, @floatFromInt(@as(i32, @intCast(h & 0x7FFFFFFF)))) / @as(f32, 0x7FFFFFFF) * 2.0 - 1.0;
+            slot.* = @as(f32, @floatFromInt(@as(i32, @intCast(h & 0x7FFFFFFF)))) / 2147483647.0 * 2.0 - 1.0;
         }
         // Normalize
         var norm: f32 = 0;
@@ -393,7 +397,7 @@ const Date = struct { year: i32, month: i32, day: i32 };
 
 fn epochDayToDate(days: i64) Date {
     // Algorithm from Howard Hinnant's date library (civil_from_days)
-    var z = days + 719468;
+    const z = days + 719468;
     const era: i64 = @divFloor(if (z >= 0) z else z - 146096, 146097);
     const doe: u64 = @intCast(z - era * 146097);
     const yoe: u64 = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
