@@ -19,6 +19,9 @@ const memory_mod = @import("memory/root.zig");
 const Memory = memory_mod.Memory;
 const observability = @import("observability.zig");
 const brain_events = @import("brain_events.zig");
+const amygdala_mod = @import("amygdala.zig");
+const prefrontal_mod = @import("prefrontal.zig");
+const hippocampus_mod = @import("hippocampus.zig");
 const Observer = observability.Observer;
 const tools_mod = @import("tools/root.zig");
 const Tool = tools_mod.Tool;
@@ -38,6 +41,13 @@ fn rasInterruptBridge(ctx: *anyopaque) ?[]const u8 {
         return sig.message;
     }
     return null;
+}
+
+/// Hippocampus worker thread — fire-and-forget memory consolidation.
+fn hippoWorker(hippo: *hippocampus_mod.Hippocampus, content: []const u8, response: []const u8, allocator: std.mem.Allocator) void {
+    hippo.consolidate(content, response);
+    allocator.free(content);
+    allocator.free(response);
 }
 
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
@@ -85,6 +95,9 @@ pub const SessionManager = struct {
     /// Brain-arch extensions
     thalamus: ?Thalamus = null,
     ras: ?Ras = null,
+    amygdala: ?amygdala_mod.Amygdala = null,
+    prefrontal: ?prefrontal_mod.Prefrontal = null,
+    hippocampus: ?hippocampus_mod.Hippocampus = null,
 
     mutex: std.Thread.Mutex,
     sessions: std.StringHashMapUnmanaged(*Session),
@@ -126,6 +139,24 @@ pub const SessionManager = struct {
     pub fn enableRas(self: *SessionManager) void {
         self.ras = Ras.init(self.allocator);
         log.info("ras enabled", .{});
+    }
+
+    /// Enable the Amygdala safety gate (uses same model as Thalamus).
+    pub fn enableAmygdala(self: *SessionManager, model_name: []const u8) void {
+        self.amygdala = amygdala_mod.Amygdala.init(self.allocator, &self.provider, model_name);
+        log.info("amygdala enabled: model={s}", .{model_name});
+    }
+
+    /// Enable the Prefrontal Cortex for deep async reasoning.
+    pub fn enablePrefrontal(self: *SessionManager, model_name: []const u8) void {
+        self.prefrontal = prefrontal_mod.Prefrontal.init(self.allocator, &self.provider, model_name);
+        log.info("prefrontal enabled: model={s}", .{model_name});
+    }
+
+    /// Enable the Hippocampus for memory consolidation.
+    pub fn enableHippocampus(self: *SessionManager, model_name: []const u8) void {
+        self.hippocampus = hippocampus_mod.Hippocampus.init(self.allocator, &self.provider, model_name, self.config.workspace_dir);
+        log.info("hippocampus enabled: model={s}", .{model_name});
     }
 
     pub fn deinit(self: *SessionManager) void {
@@ -303,6 +334,7 @@ pub const SessionManager = struct {
         // sink (sub-500ms), then continue to the full turn.
         var thalamus_header: ?[]const u8 = null;
         defer if (thalamus_header) |h| self.allocator.free(h);
+        var thalamus_class: thalamus_mod.SignalClass = .simple;
 
         if (self.thalamus) |*thal| {
             if (thal.enabled) {
@@ -321,6 +353,8 @@ pub const SessionManager = struct {
                         cls.confidence,
                     }) catch "";
                     brain_events.emit(.thalamus_classify, ev_data);
+
+                    thalamus_class = cls.class;
 
                     // Send reflex response immediately if available
                     if (cls.reflex_response) |reflex| {
@@ -358,9 +392,56 @@ pub const SessionManager = struct {
         } else content;
         defer if (thalamus_header != null) self.allocator.free(effective_content);
 
+        // ── Amygdala: Safety gate for dangerous requests ─────────────
+        if (thalamus_class == .dangerous) {
+            if (self.amygdala) |*amygdala| {
+                var safety = amygdala.assess(content) catch null;
+                if (safety) |*s| {
+                    defer s.deinit();
+                    if (s.verdict == .block) {
+                        const block_msg = if (s.message) |m|
+                            try std.fmt.allocPrint(self.allocator, "⚠️ **Blocked by safety gate (Amygdala)**\n\nReason: {s}", .{m})
+                        else
+                            try self.allocator.dupe(u8, "⚠️ **Blocked by safety gate (Amygdala)**\n\nThis action was deemed too dangerous to proceed.");
+                        return block_msg;
+                    }
+                }
+            }
+        }
+
         brain_events.emit(.broca_start, "{}");
         const response = try session.agent.turn(effective_content);
         brain_events.emit(.broca_done, "{}");
+
+        // ── Prefrontal: Deep async analysis for complex queries ──────
+        if (thalamus_class == .complex) {
+            if (self.prefrontal) |*prefrontal| {
+                var result = prefrontal.analyze(content, response) catch null;
+                if (result) |*r| {
+                    defer r.deinit();
+                    if (r.analysis.len > 0) {
+                        // Append prefrontal analysis to response
+                        const combined = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, r.analysis }) catch null;
+                        if (combined) |c| {
+                            self.allocator.free(response);
+                            return c;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Hippocampus: Memory consolidation (fire-and-forget) ──────
+        if (thalamus_class != .reflex) {
+            if (self.hippocampus) |*hippo| {
+                const content_copy = self.allocator.dupe(u8, content) catch null;
+                const response_copy = self.allocator.dupe(u8, response) catch null;
+                if (content_copy != null and response_copy != null) {
+                    const hippo_thread = std.Thread.spawn(.{ .stack_size = 64 * 1024 }, hippoWorker, .{ hippo, content_copy.?, response_copy.?, self.allocator }) catch null;
+                    if (hippo_thread) |t| t.detach();
+                }
+            }
+        }
         session.turn_count += 1;
         session.last_active = std.time.timestamp();
 

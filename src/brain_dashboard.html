@@ -21,6 +21,9 @@ body { background: #0a0a0f; color: #e0e0e0; font-family: 'JetBrains Mono', 'SF M
 .kind-thalamus { color: #f59e0b; }
 .kind-ras { color: #ef4444; }
 .kind-broca { color: #3b82f6; }
+.kind-amygdala { color: #f43f5e; }
+.kind-prefrontal { color: #7c5cff; }
+.kind-hippocampus { color: #10b981; }
 #regions { position: absolute; bottom: 20px; right: 24px; display: flex; gap: 8px; flex-wrap: wrap; max-width: 800px; justify-content: flex-end; }
 .region-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 8px 12px; min-width: 100px; text-align: center; transition: all 0.3s ease; }
 .region-card.active { border-color: var(--color); box-shadow: 0 0 20px var(--glow); }
@@ -203,7 +206,7 @@ function flashConnection(fromId, toId) {
 const logEl = document.getElementById('event-log');
 const MAX_LOG = 25;
 function logEvent(kind, detail) {
-  const kindClass = kind.startsWith('thalamus') ? 'thalamus' : kind.startsWith('ras') ? 'ras' : 'broca';
+  const kindClass = kind.startsWith('thalamus') ? 'thalamus' : kind.startsWith('ras') ? 'ras' : kind.startsWith('amygdala') ? 'amygdala' : kind.startsWith('prefrontal') ? 'prefrontal' : kind.startsWith('hippocampus') ? 'hippocampus' : 'broca';
   const now = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const entry = document.createElement('div');
   entry.className = 'entry';
@@ -260,6 +263,41 @@ function connect() {
       flashConnection('ras', 'amygdala');
       document.getElementById('s-ras').textContent = '🚨 INTERRUPT';
       logEvent('ras', '🚨 <b>INTERRUPT FIRED</b>');
+    },
+    amygdala_assess(d) {
+      activateRegion('amygdala', 2000);
+      document.getElementById('s-amygdala').textContent = 'assessing';
+      flashConnection('thalamus', 'amygdala');
+      logEvent('amygdala', '🛡️ safety check');
+    },
+    amygdala_result(d) {
+      const v = d.data?.verdict || '?';
+      document.getElementById('s-amygdala').textContent = v;
+      setTimeout(() => document.getElementById('s-amygdala').textContent = '—', 3000);
+      const icon = v === 'block' ? '🚫' : v === 'warn' ? '⚠️' : '✅';
+      logEvent('amygdala', `${icon} verdict=<b>${v}</b>`);
+    },
+    prefrontal_start(d) {
+      activateRegion('prefrontal', 20000);
+      document.getElementById('s-prefrontal').textContent = 'reasoning';
+      flashConnection('thalamus', 'prefrontal');
+      logEvent('prefrontal', '🧠 deep analysis started');
+    },
+    prefrontal_done(d) {
+      document.getElementById('s-prefrontal').textContent = '—';
+      logEvent('prefrontal', '🧠 analysis complete');
+    },
+    hippocampus_start(d) {
+      activateRegion('hippocampus', 3000);
+      document.getElementById('s-hippocampus').textContent = 'consolidating';
+      flashConnection('broca', 'hippocampus');
+      logEvent('hippocampus', '💾 memory consolidation');
+    },
+    hippocampus_done(d) {
+      const saved = d.data?.saved ? '✅ saved' : '— nothing to save';
+      document.getElementById('s-hippocampus').textContent = saved;
+      setTimeout(() => document.getElementById('s-hippocampus').textContent = '—', 3000);
+      logEvent('hippocampus', `💾 ${saved}`);
     },
     broca_start(d) {
       activateRegion('broca', 15000);

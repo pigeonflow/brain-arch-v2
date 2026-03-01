@@ -328,6 +328,12 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
         }
     }
 
+    if (root.get("brain_arch_prefrontal_model")) |v| {
+        if (v == .string) {
+            self.brain_arch_prefrontal_model = try self.allocator.dupe(u8, v.string);
+        }
+    }
+
     // Model routes
     if (root.get("model_routes")) |v| {
         if (v == .array) {

@@ -17,6 +17,12 @@ pub const EventKind = enum {
     broca_done,
     broca_tool_call,
     broca_tool_result,
+    amygdala_assess,
+    amygdala_result,
+    prefrontal_start,
+    prefrontal_done,
+    hippocampus_start,
+    hippocampus_done,
 };
 
 pub const Event = struct {

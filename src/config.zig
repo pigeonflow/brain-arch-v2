@@ -145,6 +145,7 @@ pub const Config = struct {
 
     // Brain-arch extensions
     brain_arch_thalamus_model: ?[]const u8 = null,
+    brain_arch_prefrontal_model: ?[]const u8 = null,
 
     // Convenience aliases for backward-compat flat access used by other modules.
     // These are set during load() to mirror nested values.
@@ -180,6 +181,11 @@ pub const Config = struct {
     pub fn getBrainArchThalamus(self: *const Config) ?[]const u8 {
         if (self.brain_arch_thalamus_model) |m| return m;
         return std.posix.getenv("BRAIN_ARCH_THALAMUS");
+    }
+
+    pub fn getBrainArchPrefrontal(self: *const Config) ?[]const u8 {
+        if (self.brain_arch_prefrontal_model) |m| return m;
+        return std.posix.getenv("BRAIN_ARCH_PREFRONTAL");
     }
 
     /// Look up a provider's base_url from the providers list.
