@@ -2292,7 +2292,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
     var sec_policy_opt: ?security.SecurityPolicy = null;
     var gateway_thread_observer = GatewayThreadObserver.init(allocator);
     defer gateway_thread_observer.deinit();
-    const needs_local_agent = event_bus == null;
+    const needs_local_agent = event_bus == null or true; // Always init for /chat endpoint
 
     if (config_opt) |cfg_ptr| {
         const cfg = cfg_ptr;
@@ -2462,12 +2462,13 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
         const target = parts.next() orelse continue;
 
         // Simple routing — control endpoints + descriptor-driven channel webhooks.
-        const ControlRoute = enum { health, ready, webhook, pair };
+        const ControlRoute = enum { health, ready, webhook, pair, chat };
         const control_route_map = std.StaticStringMap(ControlRoute).initComptime(.{
             .{ "/health", .health },
             .{ "/ready", .ready },
             .{ "/webhook", .webhook },
             .{ "/pair", .pair },
+            .{ "/chat", .chat },
         });
         const base_path = if (std.mem.indexOfScalar(u8, target, '?')) |qi| target[0..qi] else target;
         const is_post = std.mem.eql(u8, method_str, "POST");
@@ -2569,6 +2570,43 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                             response_body = "{\"status\":\"received\"}";
                         }
                     }
+                }
+            },
+            .chat => {
+                // Synchronous REST chat endpoint: POST /chat
+                // Body: {"message": "...", "session": "optional-key"}
+                // Response: {"response": "..."}
+                if (!is_post) {
+                    response_status = "405 Method Not Allowed";
+                    response_body = "{\"error\":\"method not allowed\"}";
+                } else if (session_mgr_opt) |*sm| {
+                    const body = extractBody(raw);
+                    if (body) |b| {
+                        const msg_text = jsonStringField(b, "message") orelse jsonStringField(b, "text") orelse b;
+                        const session_key = jsonStringField(b, "session") orelse "chat:default";
+
+                        const reply: ?[]const u8 = sm.processMessage(session_key, msg_text, null) catch |err| blk: {
+                            response_body = userFacingAgentErrorJson(err);
+                            break :blk null;
+                        };
+                        if (reply) |r| {
+                            // Build JSON response with the reply
+                            const escaped = std.json.fmt(r, .{});
+                            const json_resp = std.fmt.allocPrint(req_allocator, "{{\"response\":{f}}}", .{escaped}) catch null;
+                            if (json_resp) |jr| {
+                                response_body = jr;
+                            } else {
+                                response_body = "{\"error\":\"response too large\"}";
+                            }
+                            allocator.free(r);
+                        }
+                    } else {
+                        response_status = "400 Bad Request";
+                        response_body = "{\"error\":\"missing body\"}";
+                    }
+                } else {
+                    response_status = "503 Service Unavailable";
+                    response_body = "{\"error\":\"session manager not ready\"}";
                 }
             },
             .pair => {

@@ -301,6 +301,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         var effective_message = message;
         var thalamus_alloc: ?[]const u8 = null;
         defer if (thalamus_alloc) |ta| allocator.free(ta);
+        var thalamus_class: thalamus_mod.SignalClass = .simple;
 
         if (thalamus) |*thal| {
             const timer = std.time.milliTimestamp();
@@ -309,7 +310,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 defer cls.deinit(allocator);
                 const elapsed = std.time.milliTimestamp() - timer;
                 std.debug.print("  [thalamus] {s} ({d}ms) confidence={d:.2}\n", .{ cls.class.toSlice(), elapsed, cls.confidence });
-
+                thalamus_class = cls.class;
                 if (cls.reflex_response) |reflex| {
                     if (cls.class == .reflex and cls.confidence >= 0.90) {
                         // Short-circuit: skip full agent turn for reflexes
@@ -354,6 +355,51 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             try w.print("{s}\n", .{response});
         }
         try w.flush();
+
+        // Brain-arch: Cortex deep analysis for complex queries
+        if (thalamus) |_| {
+            // Check if we stored a complex classification
+            if (thalamus_class == .complex) {
+                std.debug.print("  [cortex] Spawning deep analysis (claude-opus-4.6)...\n", .{});
+                try w.print("\n--- [Cortex: deep analysis] ---\n", .{});
+                try w.flush();
+
+                // Create a second agent with Opus model
+                var cortex_cfg = cfg;
+                cortex_cfg.default_model = "claude-opus-4.6";
+
+                var cortex_agent = try Agent.fromConfig(allocator, &cortex_cfg, provider_i, tools, mem_opt, obs);
+                defer cortex_agent.deinit();
+                cortex_agent.policy = &policy;
+
+                if (supports_streaming) {
+                    cortex_agent.stream_callback = cliStreamCallback;
+                    cortex_agent.stream_ctx = @ptrCast(&stream_ctx);
+                }
+
+                const cortex_prompt = try std.fmt.allocPrint(allocator,
+                    "You are Cortex, a deep reasoning module. The user asked: \"{s}\"\n\nBroca's (fast response) said: \"{s}\"\n\nProvide a deeper, more thorough analysis. Add insights Broca's may have missed. Be comprehensive but structured.",
+                    .{ message, response },
+                );
+                defer allocator.free(cortex_prompt);
+
+                const cortex_response = cortex_agent.turn(cortex_prompt) catch |err| {
+                    std.debug.print("  [cortex] error: {s}\n", .{@errorName(err)});
+                    try w.print("[cortex error: {s}]\n", .{@errorName(err)});
+                    try w.flush();
+                    return;
+                };
+                defer allocator.free(cortex_response);
+
+                if (supports_streaming) {
+                    try w.print("\n", .{});
+                } else {
+                    try w.print("{s}\n", .{cortex_response});
+                }
+                try w.flush();
+            }
+        }
+
         return;
     }
 
