@@ -23,6 +23,7 @@ const onboard = @import("../onboard.zig");
 const streaming = @import("../streaming.zig");
 const thalamus_mod = @import("../thalamus.zig");
 const ras_mod = @import("../ras.zig");
+const brain_events = @import("../brain_events.zig");
 
 const Agent = @import("root.zig").Agent;
 
@@ -295,6 +296,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             agent.interrupt_check = rasInterruptBridge;
             agent.interrupt_check_ctx = @ptrCast(r);
             r.agentBusy();
+            brain_events.emit(.ras_busy, "{}");
         }
 
         // Brain-arch: Thalamus pre-classification
@@ -311,8 +313,18 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
                 const elapsed = std.time.milliTimestamp() - timer;
                 std.debug.print("  [thalamus] {s} ({d}ms) confidence={d:.2}\n", .{ cls.class.toSlice(), elapsed, cls.confidence });
                 thalamus_class = cls.class;
+
+                // Emit brain event
+                var ev_buf: [512]u8 = undefined;
+                const ev_data = std.fmt.bufPrint(&ev_buf, "{{\"class\":\"{s}\",\"confidence\":{d:.2}}}", .{
+                    cls.class.toSlice(),
+                    cls.confidence,
+                }) catch "";
+                brain_events.emit(.thalamus_classify, ev_data);
+
                 if (cls.reflex_response) |reflex| {
                     if (cls.class == .reflex and cls.confidence >= 0.90) {
+                        brain_events.emit(.thalamus_reflex, "{}");
                         // Short-circuit: skip full agent turn for reflexes
                         std.debug.print("  [thalamus] SHORT-CIRCUIT reflex: {s}\n", .{reflex});
                         try w.print("{s}\n", .{reflex});
@@ -335,7 +347,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             }
         }
 
+        brain_events.emit(.broca_start, "{}");
         const response = agent.turn(effective_message) catch |err| {
+            brain_events.emit(.broca_done, "{}");
             if (err == error.ProviderDoesNotSupportVision) {
                 try w.print("Error: The current provider does not support image input. Switch to a vision-capable provider or remove [IMAGE:] attachments.\n", .{});
                 try w.flush();
@@ -348,6 +362,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             return err;
         };
         defer allocator.free(response);
+        brain_events.emit(.broca_done, "{}");
 
         if (supports_streaming) {
             try w.print("\n", .{});
