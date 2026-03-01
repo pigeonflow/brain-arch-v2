@@ -74,6 +74,8 @@ pub const Hippocampus = struct {
 
     /// Consolidate memories from a conversation exchange. Fire-and-forget.
     pub fn consolidate(self: *Hippocampus, user_message: []const u8, agent_response: []const u8) void {
+        const hlog = std.log.scoped(.hippocampus);
+        hlog.info("consolidation starting", .{});
         brain_events.emit(.hippocampus_start, "{\"phase\":\"consolidate\"}");
 
         const context = std.fmt.allocPrint(self.allocator, "User: {s}\nAssistant: {s}", .{ user_message, agent_response }) catch return;
@@ -111,11 +113,13 @@ pub const Hippocampus = struct {
         if (std.mem.indexOf(u8, response, "\"worth_saving\":true") == null and
             std.mem.indexOf(u8, response, "\"worth_saving\": true") == null)
         {
+            hlog.info("not worth saving", .{});
             brain_events.emit(.hippocampus_done, "{\"saved\":false,\"reason\":\"not_worth\"}");
             return;
         }
 
         // Extract and store memories via clawmem
+        hlog.info("worth saving, storing via clawmem (bin={s}, db={s})", .{ self.clawmem_bin, self.clawmem_db });
         const count = self.storeMemories(response);
         var event_buf: [128]u8 = undefined;
         const event = std.fmt.bufPrint(&event_buf, "{{\"saved\":true,\"count\":{d}}}", .{count}) catch "{\"saved\":true}";
@@ -224,18 +228,26 @@ pub const Hippocampus = struct {
 
         // Call clawmem search
         const results = self.callClawmemSearch(&query_emb, 5) catch {
+            
             brain_events.emit(.hippocampus_done, "{\"retrieved\":0}");
             return null;
         };
+
+        if (results.len == 0) {
+            brain_events.emit(.hippocampus_done, "{\"retrieved\":0}");
+            return null;
+        }
         defer self.allocator.free(results);
 
-        if (results.len == 0 or std.mem.eql(u8, results, "[]") or std.mem.eql(u8, results, "[\n]")) {
+        // Check for empty/no results — must contain actual content field
+        if (std.mem.indexOf(u8, results, "\"content\":\"") == null) {
             brain_events.emit(.hippocampus_done, "{\"retrieved\":0}");
             return null;
         }
 
         // Parse results and format as context
         const formatted = self.formatMemories(results) catch {
+            
             brain_events.emit(.hippocampus_done, "{\"retrieved\":0,\"error\":\"format\"}");
             return null;
         };
