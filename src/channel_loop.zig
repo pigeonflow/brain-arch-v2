@@ -303,6 +303,12 @@ pub const ChannelRuntime = struct {
         var session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
         session_mgr.policy = security_policy;
 
+        // Brain-arch: Enable Thalamus + RAS if configured
+        if (config.getBrainArchThalamus()) |thalamus_model| {
+            session_mgr.enableThalamus(thalamus_model);
+            session_mgr.enableRas();
+        }
+
         // Self — heap-allocated so pointers remain stable
         const self = try allocator.create(ChannelRuntime);
         self.* = .{

@@ -26,6 +26,7 @@ const security = @import("security/policy.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
 const channels = @import("channels/root.zig");
 const bus_mod = @import("bus.zig");
+const ras_mod = @import("ras.zig");
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -1585,6 +1586,19 @@ fn handleTelegramWebhookRoute(ctx: *WebhookHandlerContext) void {
             const peer_kind = if (is_group) "group" else "direct";
 
             if (ctx.state.event_bus) |eb| {
+                // ── Brain-arch: RAS intercept at gateway level ──
+                // If agent is busy, route directly to RAS (bypass event bus queue)
+                if (ras_mod.getGlobal()) |ras| {
+                    if (ras.isAgentBusy()) {
+                        var kb: [64]u8 = undefined;
+                        const tg_cfg_opt: ?*const Config = if (ctx.config_opt) |cfg| cfg else null;
+                        const sk = telegramSessionKeyRouted(ctx.req_allocator, &kb, chat_id.?, b, tg_cfg_opt, tg_account_id);
+                        ras.onMessageWhileBusy(msg_text.?, sk) catch {};
+                        ctx.response_body = "{\"status\":\"ok\",\"ras\":\"intercepted\"}";
+                        return;
+                    }
+                }
+
                 var meta_buf: [320]u8 = undefined;
                 const meta = std.fmt.bufPrint(&meta_buf, "{{\"account_id\":\"{s}\",\"peer_kind\":\"{s}\",\"peer_id\":\"{s}\"}}", .{
                     tg_account_id,

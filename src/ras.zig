@@ -8,6 +8,18 @@
 //! This solves the "deaf while working" problem — the brain's RAS never sleeps.
 
 const std = @import("std");
+
+/// Global RAS instance — set by daemon after session manager init.
+/// Gateway reads this to route interrupts without going through the event bus queue.
+var global_ras: ?*Ras = null;
+
+pub fn setGlobal(ras: *Ras) void {
+    @atomicStore(?*Ras, &global_ras, ras, .release);
+}
+
+pub fn getGlobal() ?*Ras {
+    return @atomicLoad(?*Ras, &global_ras, .acquire);
+}
 const log = std.log.scoped(.ras);
 
 // ═══════════════════════════════════════════════════════════════════════════

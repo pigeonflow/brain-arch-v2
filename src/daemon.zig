@@ -21,6 +21,7 @@ const channel_adapters = @import("channel_adapters.zig");
 const heartbeat_mod = @import("heartbeat.zig");
 const onboard = @import("onboard.zig");
 const streaming = @import("streaming.zig");
+const ras_mod = @import("ras.zig");
 
 const log = std.log.scoped(.daemon);
 
@@ -45,6 +46,8 @@ pub const DaemonState = struct {
     gateway_port: u16 = 3000,
     components: [MAX_COMPONENTS]?ComponentStatus = .{null} ** MAX_COMPONENTS,
     component_count: usize = 0,
+    ras: ?*ras_mod.Ras = null, // Brain-arch: shared RAS for gateway interrupt routing
+    allocator: ?std.mem.Allocator = null,
 
     pub fn addComponent(self: *DaemonState, name: []const u8) void {
         if (self.component_count < MAX_COMPONENTS) {
@@ -671,6 +674,20 @@ fn inboundDispatcherThread(
             .chat_id = msg.chat_id,
         };
 
+        // ── Brain-arch: RAS intercept before blocking on processMessage ──
+        // If the agent is already busy for this session, route through RAS
+        // instead of blocking the inbound loop.
+        if (runtime.session_mgr.ras) |*ras| {
+            if (ras.isAgentBusy()) {
+                log.info("ras: agent busy, routing inbound through RAS (session={s})", .{session_key});
+                ras.onMessageWhileBusy(msg.content, session_key) catch |err| {
+                    log.warn("ras: onMessageWhileBusy failed: {}", .{err});
+                };
+                // Send ack back — no reply, interrupt will fire mid-turn
+                continue;
+            }
+        }
+
         const reply = runtime.session_mgr.processMessageStreaming(
             session_key,
             msg.content,
@@ -851,6 +868,13 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
 
     var inbound_thread: ?std.Thread = null;
     if (channel_rt) |rt| {
+        // Brain-arch: Share RAS pointer with gateway for interrupt routing
+        if (rt.session_mgr.ras) |*ras| {
+            state.ras = ras;
+            state.allocator = allocator;
+            ras_mod.setGlobal(ras);
+        }
+
         state.addComponent("inbound_dispatcher");
         if (std.Thread.spawn(.{ .stack_size = 2 * 1024 * 1024 }, inboundDispatcherThread, .{
             allocator, &event_bus, &channel_registry, rt, &state,
