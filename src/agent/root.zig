@@ -288,7 +288,8 @@ pub const Agent = struct {
     /// RAS interrupt check callback. Called between tool iterations.
     /// Returns an interrupt message if the agent should stop current work, or null.
     /// The agent owns the returned slice and must free it.
-    interrupt_check: ?*const fn () ?[]const u8 = null,
+    interrupt_check: ?*const fn (*anyopaque) ?[]const u8 = null,
+    interrupt_check_ctx: ?*anyopaque = null,
 
     /// Conversation context for the current turn (Signal-specific for now).
     conversation_context: ?prompt.ConversationContext = null,
@@ -800,7 +801,7 @@ pub const Agent = struct {
             // it as a new user message and let the agent redirect.
             if (iteration > 0) {
                 if (self.interrupt_check) |check_fn| {
-                    if (check_fn()) |interrupt_msg| {
+                    if (check_fn(self.interrupt_check_ctx.?)) |interrupt_msg| {
                         defer self.allocator.free(interrupt_msg);
                         log.info("RAS interrupt received, injecting: {s}", .{interrupt_msg[0..@min(interrupt_msg.len, 80)]});
 

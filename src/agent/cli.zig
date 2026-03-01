@@ -22,6 +22,7 @@ const auth_mod = @import("../auth.zig");
 const onboard = @import("../onboard.zig");
 const streaming = @import("../streaming.zig");
 const thalamus_mod = @import("../thalamus.zig");
+const ras_mod = @import("../ras.zig");
 
 const Agent = @import("root.zig").Agent;
 
@@ -252,6 +253,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         std.debug.print("  [brain-arch] Thalamus: {s}\n", .{thalamus_model});
     }
 
+    // Brain-arch: Initialize RAS if Thalamus is active
+    var ras: ?ras_mod.Ras = if (thalamus != null) ras_mod.Ras.init(allocator) else null;
+    defer if (ras) |*r| r.deinit();
+
     const supports_streaming = provider_i.supportsStreaming();
 
     // Single message mode: nullclaw agent -m "hello"
@@ -283,6 +288,13 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         if (supports_streaming) {
             agent.stream_callback = cliStreamCallback;
             agent.stream_ctx = @ptrCast(&stream_ctx);
+        }
+
+        // Brain-arch: Wire RAS interrupt check
+        if (ras) |*r| {
+            agent.interrupt_check = rasInterruptBridge;
+            agent.interrupt_check_ctx = @ptrCast(r);
+            r.agentBusy();
         }
 
         // Brain-arch: Thalamus pre-classification
@@ -416,6 +428,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         agent.stream_ctx = @ptrCast(&stream_ctx);
     }
 
+    // Brain-arch: Wire RAS interrupt check for REPL
+    if (ras) |*r| {
+        agent.interrupt_check = rasInterruptBridge;
+        agent.interrupt_check_ctx = @ptrCast(r);
+    }
+
     const stdin = std.fs.File.stdin();
     var line_buf: [4096]u8 = undefined;
 
@@ -501,6 +519,16 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn noopSinkEvent(_: *anyopaque, _: streaming.Event) void {}
+
+/// Bridge function: connects Agent.interrupt_check to RAS.checkInterrupt
+fn rasInterruptBridge(ctx: *anyopaque) ?[]const u8 {
+    const r: *ras_mod.Ras = @ptrCast(@alignCast(ctx));
+    if (r.checkInterrupt()) |sig| {
+        // Agent owns the message slice — RAS already duped it
+        return sig.message;
+    }
+    return null;
+}
 
 test "cliStreamCallback handles empty delta" {
     var sink_ctx: u8 = 0;

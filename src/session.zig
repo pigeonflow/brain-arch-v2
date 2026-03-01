@@ -30,6 +30,15 @@ const Ras = ras_mod.Ras;
 const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
 
+/// Bridge function: connects Agent.interrupt_check to RAS.checkInterrupt
+fn rasInterruptBridge(ctx: *anyopaque) ?[]const u8 {
+    const ras: *ras_mod.Ras = @ptrCast(@alignCast(ctx));
+    if (ras.checkInterrupt()) |sig| {
+        return sig.message;
+    }
+    return null;
+}
+
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
     if (text.len <= MESSAGE_LOG_MAX_BYTES) {
         return .{ .slice = text, .truncated = false };
@@ -254,6 +263,15 @@ pub const SessionManager = struct {
 
         const session = try self.getOrCreate(session_key);
 
+        // ── RAS: If agent is busy, route through RAS instead of blocking ──
+        if (self.ras) |*ras| {
+            if (ras.isAgentBusy()) {
+                log.info("ras: agent busy, routing message through RAS", .{});
+                try ras.onMessageWhileBusy(content, session_key);
+                return try self.allocator.dupe(u8, ""); // Empty response — interrupt will be processed mid-turn
+            }
+        }
+
         session.mutex.lock();
         defer session.mutex.unlock();
 
@@ -311,7 +329,11 @@ pub const SessionManager = struct {
         }
 
         // ── RAS: Mark agent as busy ──────────────────────────────────
-        if (self.ras) |*ras| ras.agentBusy();
+        if (self.ras) |*ras| {
+            ras.agentBusy();
+            session.agent.interrupt_check = rasInterruptBridge;
+            session.agent.interrupt_check_ctx = @ptrCast(ras);
+        }
         defer if (self.ras) |*ras| {
             const queued = ras.agentIdle();
             // TODO: Process queued messages in next turn

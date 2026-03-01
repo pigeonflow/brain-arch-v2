@@ -284,3 +284,39 @@ test "ras queues low priority messages" {
     allocator.free(queued[0].content);
     allocator.free(queued[0].session_key);
 }
+
+test "ras concurrent interrupt from another thread" {
+    const allocator = std.testing.allocator;
+    var ras = Ras.init(allocator);
+    defer ras.deinit();
+
+    ras.agentBusy();
+
+    // Simulate interrupt arriving from gateway thread
+    const sender = try std.Thread.spawn(.{}, struct {
+        fn run(r: *Ras) void {
+            // Small delay to simulate message arriving mid-turn
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+            r.onMessageWhileBusy("actually, do something else", "session-1") catch {};
+        }
+    }.run, .{&ras});
+
+    // Simulate agent checking interrupt in tool loop
+    var found_interrupt = false;
+    for (0..100) |_| {
+        if (ras.checkInterrupt()) |sig| {
+            try std.testing.expectEqual(InterruptPriority.high, sig.priority);
+            try std.testing.expectEqualStrings("actually, do something else", sig.message);
+            allocator.free(sig.message);
+            allocator.free(sig.source);
+            found_interrupt = true;
+            break;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    try std.testing.expect(found_interrupt);
+
+    sender.join();
+    const queued = ras.agentIdle();
+    allocator.free(queued);
+}
