@@ -303,18 +303,6 @@ pub const ChannelRuntime = struct {
         var session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
         session_mgr.policy = security_policy;
 
-        // Brain-arch: Enable Thalamus + RAS + all brain regions if configured
-        if (config.getBrainArchThalamus()) |thalamus_model| {
-            session_mgr.enableThalamus(thalamus_model);
-            session_mgr.enableRas();
-            session_mgr.enableAmygdala(thalamus_model); // Haiku for fast safety
-            session_mgr.enableHippocampus(thalamus_model); // Haiku for memory
-            // Prefrontal uses a heavier model
-            if (config.getBrainArchPrefrontal()) |prefrontal_model| {
-                session_mgr.enablePrefrontal(prefrontal_model);
-            }
-        }
-
         // Self — heap-allocated so pointers remain stable
         const self = try allocator.create(ChannelRuntime);
         self.* = .{
@@ -336,6 +324,19 @@ pub const ChannelRuntime = struct {
             self.session_mgr.mem_rt = rt;
             tools_mod.bindMemoryRuntime(tools, rt);
         }
+
+        // Brain-arch: Enable brain regions AFTER session_mgr is at its final heap address
+        // (enableThalamus etc. store &self.provider pointers — must be stable)
+        if (config.getBrainArchThalamus()) |thalamus_model| {
+            self.session_mgr.enableThalamus(thalamus_model);
+            self.session_mgr.enableRas();
+            self.session_mgr.enableAmygdala(thalamus_model);
+            self.session_mgr.enableHippocampus(thalamus_model);
+            if (config.getBrainArchPrefrontal()) |prefrontal_model| {
+                self.session_mgr.enablePrefrontal(prefrontal_model);
+            }
+        }
+
         return self;
     }
 

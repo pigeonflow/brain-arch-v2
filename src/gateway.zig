@@ -2424,11 +2424,6 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
                 var sm = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, gateway_thread_observer.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);
 
-                // Brain-arch: Enable Thalamus if configured
-                if (cfg.getBrainArchThalamus()) |thalamus_model| {
-                    sm.enableThalamus(thalamus_model);
-                    sm.enableRas();
-                }
                 if (sec_policy_opt) |*policy| {
                     sm.policy = policy;
                 }
@@ -2440,6 +2435,22 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
             }
         }
     }
+
+    // Brain-arch: Enable brain regions AFTER session_mgr_opt is at its final stack address
+    if (session_mgr_opt != null) {
+        if (config_opt) |gw_cfg| {
+            if (gw_cfg.getBrainArchThalamus()) |thalamus_model| {
+                session_mgr_opt.?.enableThalamus(thalamus_model);
+                session_mgr_opt.?.enableRas();
+                session_mgr_opt.?.enableAmygdala(thalamus_model);
+                session_mgr_opt.?.enableHippocampus(thalamus_model);
+                if (gw_cfg.getBrainArchPrefrontal()) |prefrontal_model| {
+                    session_mgr_opt.?.enablePrefrontal(prefrontal_model);
+                }
+            }
+        }
+    }
+
     if (state.pairing_guard == null) {
         state.pairing_guard = try PairingGuard.init(allocator, true, &.{});
     }
