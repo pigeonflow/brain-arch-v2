@@ -65,7 +65,7 @@ const markdown_backend = BackendDescriptor{
     .name = "markdown",
     .label = "Markdown files — simple, human-readable",
     .auto_save_default = true,
-    .capabilities = .{ .supports_keyword_rank = false, .supports_session_store = false, .supports_transactions = false, .supports_outbox = false },
+    .capabilities = .{ .supports_keyword_rank = false, .supports_session_store = true, .supports_transactions = false, .supports_outbox = false },
     .needs_db_path = false,
     .needs_workspace = true,
     .create = &createMarkdown,
@@ -287,7 +287,7 @@ fn createMarkdown(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInst
     errdefer allocator.destroy(impl_);
     impl_.* = try root.MarkdownMemory.init(allocator, cfg.workspace_dir);
     impl_.owns_self = true;
-    return .{ .memory = impl_.memory(), .session_store = null };
+    return .{ .memory = impl_.memory(), .session_store = impl_.sessionStore() };
 }
 
 fn createLucid(allocator: std.mem.Allocator, cfg: BackendConfig) !BackendInstance {

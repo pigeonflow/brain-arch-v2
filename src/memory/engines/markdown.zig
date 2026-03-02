@@ -403,6 +403,197 @@ pub const MarkdownMemory = struct {
             .vtable = &vtable,
         };
     }
+
+    // ── File-based SessionStore ────────────────────────────────────
+
+    fn sessionsDir(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/memory/sessions", .{self.workspace_dir});
+    }
+
+    fn sessionPath(self: *const Self, allocator: std.mem.Allocator, session_id: []const u8) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/memory/sessions/{s}.jsonl", .{ self.workspace_dir, session_id });
+    }
+
+    fn ensureSessionsDir(self: *const Self) void {
+        const dir_path = self.sessionsDir(self.allocator) catch return;
+        defer self.allocator.free(dir_path);
+        std.fs.makeDirAbsolute(dir_path) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => {
+                // Also ensure parent memory/ dir
+                const mem_dir = self.memoryDir(self.allocator) catch return;
+                defer self.allocator.free(mem_dir);
+                std.fs.makeDirAbsolute(mem_dir) catch {};
+                std.fs.makeDirAbsolute(dir_path) catch {};
+            },
+        };
+    }
+
+    fn escapeJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        for (s) |c| {
+            switch (c) {
+                '"' => try out.appendSlice(allocator, "\\\""),
+                '\\' => try out.appendSlice(allocator, "\\\\"),
+                '\n' => try out.appendSlice(allocator, "\\n"),
+                '\r' => try out.appendSlice(allocator, "\\r"),
+                '\t' => try out.appendSlice(allocator, "\\t"),
+                else => {
+                    if (c < 0x20) {
+                        var buf: [6]u8 = undefined;
+                        const hex = std.fmt.bufPrint(&buf, "\\u{x:0>4}", .{c}) catch continue;
+                        try out.appendSlice(allocator, hex);
+                    } else {
+                        try out.append(allocator, c);
+                    }
+                },
+            }
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn saveMessage(self: *Self, session_id: []const u8, role: []const u8, content: []const u8) !void {
+        self.ensureSessionsDir();
+        const path = try self.sessionPath(self.allocator, session_id);
+        defer self.allocator.free(path);
+
+        const escaped_content = try escapeJsonString(self.allocator, content);
+        defer self.allocator.free(escaped_content);
+
+        const line = try std.fmt.allocPrint(self.allocator, "{{\"role\":\"{s}\",\"content\":\"{s}\"}}\n", .{ role, escaped_content });
+        defer self.allocator.free(line);
+
+        const file = try std.fs.createFileAbsolute(path, .{ .truncate = false });
+        defer file.close();
+        try file.seekFromEnd(0);
+        try file.writeAll(line);
+    }
+
+    pub fn loadMessages(self: *Self, allocator: std.mem.Allocator, session_id: []const u8) ![]root.MessageEntry {
+        const path = try self.sessionPath(self.allocator, session_id);
+        defer self.allocator.free(path);
+
+        const file = std.fs.openFileAbsolute(path, .{}) catch return &.{};
+        defer file.close();
+        const data = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return &.{};
+        defer allocator.free(data);
+
+        var entries: std.ArrayList(root.MessageEntry) = .empty;
+        errdefer {
+            for (entries.items) |*e| {
+                allocator.free(e.role);
+                allocator.free(e.content);
+            }
+            entries.deinit(allocator);
+        }
+
+        var iter = std.mem.splitSequence(u8, data, "\n");
+        while (iter.next()) |line| {
+            if (line.len == 0) continue;
+            // Simple JSON parsing for {"role":"...","content":"..."}
+            const role_start = std.mem.indexOf(u8, line, "\"role\":\"") orelse continue;
+            const role_begin = role_start + 8;
+            const role_end = std.mem.indexOfPos(u8, line, role_begin, "\"") orelse continue;
+            const content_start = std.mem.indexOf(u8, line, "\"content\":\"") orelse continue;
+            const content_begin = content_start + 11;
+            // Find the closing quote, handling escapes
+            var content_end: usize = content_begin;
+            while (content_end < line.len) {
+                if (line[content_end] == '\\' and content_end + 1 < line.len) {
+                    content_end += 2;
+                    continue;
+                }
+                if (line[content_end] == '"') break;
+                content_end += 1;
+            }
+            // Unescape the content
+            const raw_content = line[content_begin..content_end];
+            const unescaped = try self.unescapeJsonString(allocator, raw_content);
+
+            try entries.append(allocator, .{
+                .role = try allocator.dupe(u8, line[role_begin..role_end]),
+                .content = unescaped,
+            });
+        }
+
+        return entries.toOwnedSlice(allocator);
+    }
+
+    fn unescapeJsonString(_: *Self, allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        var i: usize = 0;
+        while (i < s.len) {
+            if (s[i] == '\\' and i + 1 < s.len) {
+                switch (s[i + 1]) {
+                    'n' => try out.append(allocator, '\n'),
+                    'r' => try out.append(allocator, '\r'),
+                    't' => try out.append(allocator, '\t'),
+                    '"' => try out.append(allocator, '"'),
+                    '\\' => try out.append(allocator, '\\'),
+                    'u' => {
+                        // Skip \uXXXX — just output a space for control chars
+                        i += 6;
+                        try out.append(allocator, ' ');
+                        continue;
+                    },
+                    else => {
+                        try out.append(allocator, s[i]);
+                        try out.append(allocator, s[i + 1]);
+                    },
+                }
+                i += 2;
+            } else {
+                try out.append(allocator, s[i]);
+                i += 1;
+            }
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    pub fn clearMessages(self: *Self, session_id: []const u8) !void {
+        const path = try self.sessionPath(self.allocator, session_id);
+        defer self.allocator.free(path);
+        std.fs.deleteFileAbsolute(path) catch {};
+    }
+
+    pub fn clearAutoSaved(self: *Self, session_id: ?[]const u8) !void {
+        _ = session_id;
+        _ = self;
+        // No auto-saved memories to clear in markdown backend
+    }
+
+    fn implSessionSaveMessage(ptr: *anyopaque, session_id: []const u8, role: []const u8, content: []const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.saveMessage(session_id, role, content);
+    }
+
+    fn implSessionLoadMessages(ptr: *anyopaque, allocator: std.mem.Allocator, session_id: []const u8) anyerror![]root.MessageEntry {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.loadMessages(allocator, session_id);
+    }
+
+    fn implSessionClearMessages(ptr: *anyopaque, session_id: []const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.clearMessages(session_id);
+    }
+
+    fn implSessionClearAutoSaved(ptr: *anyopaque, session_id: ?[]const u8) anyerror!void {
+        const self_: *Self = @ptrCast(@alignCast(ptr));
+        return self_.clearAutoSaved(session_id);
+    }
+
+    const session_vtable = root.SessionStore.VTable{
+        .saveMessage = &implSessionSaveMessage,
+        .loadMessages = &implSessionLoadMessages,
+        .clearMessages = &implSessionClearMessages,
+        .clearAutoSaved = &implSessionClearAutoSaved,
+    };
+
+    pub fn sessionStore(self: *Self) root.SessionStore {
+        return .{ .ptr = @ptrCast(self), .vtable = &session_vtable };
+    }
 };
 
 // ── Tests ──────────────────────────────────────────────────────────
