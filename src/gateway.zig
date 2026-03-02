@@ -18,6 +18,7 @@ const config_types = @import("config_types.zig");
 const session_mod = @import("session.zig");
 const providers = @import("providers/root.zig");
 const tools_mod = @import("tools/root.zig");
+const mcp_mod = @import("mcp.zig");
 const memory_mod = @import("memory/root.zig");
 const subagent_mod = @import("subagent.zig");
 const observability = @import("observability.zig");
@@ -32,8 +33,8 @@ const brain_events_mod = @import("brain_events.zig");
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
 
-/// Request timeout (30s) — prevents slow-loris attacks.
-pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Request timeout (5 min) — allows multi-step task mode turns to complete.
+pub const REQUEST_TIMEOUT_SECS: u64 = 300;
 
 /// Sliding window for rate limiting (60s).
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -2403,6 +2404,16 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     subagent_manager_opt = mgr;
                 }
 
+                // MCP tools (external tool servers)
+                const mcp_tools: ?[]const tools_mod.Tool = if (config_opt) |co| blk: {
+                    if (co.mcp_servers.len > 0) {
+                        break :blk mcp_mod.initMcpTools(allocator, co.mcp_servers) catch {
+                            break :blk null;
+                        };
+                    }
+                    break :blk null;
+                } else null;
+
                 // Tools.
                 tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
                     .http_enabled = cfg.http_request.enabled,
@@ -2419,6 +2430,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     .allowed_paths = cfg.autonomy.allowed_paths,
                     .policy = if (sec_policy_opt) |*policy| policy else null,
                     .subagent_manager = subagent_manager_opt,
+                    .mcp_tools = mcp_tools,
                 }) catch &.{};
 
                 const mem_opt: ?memory_mod.Memory = if (mem_rt) |rt| rt.memory else null;
