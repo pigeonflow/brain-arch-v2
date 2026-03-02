@@ -2456,9 +2456,7 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                 session_mgr_opt.?.enableRas();
                 session_mgr_opt.?.enableAmygdala(thalamus_model);
                 session_mgr_opt.?.enableHippocampus(thalamus_model);
-                if (gw_cfg.getBrainArchPrefrontal()) |prefrontal_model| {
-                    session_mgr_opt.?.enablePrefrontal(prefrontal_model);
-                }
+                // prefrontal removed — unified into single agent turn with Opus
             }
         }
     }

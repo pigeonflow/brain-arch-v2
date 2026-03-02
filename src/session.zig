@@ -20,7 +20,7 @@ const Memory = memory_mod.Memory;
 const observability = @import("observability.zig");
 const brain_events = @import("brain_events.zig");
 const amygdala_mod = @import("amygdala.zig");
-const prefrontal_mod = @import("prefrontal.zig");
+// prefrontal.zig removed — unified into single agent turn with Opus
 const hippocampus_mod = @import("hippocampus.zig");
 const Observer = observability.Observer;
 const tools_mod = @import("tools/root.zig");
@@ -96,7 +96,7 @@ pub const SessionManager = struct {
     thalamus: ?Thalamus = null,
     ras: ?Ras = null,
     amygdala: ?amygdala_mod.Amygdala = null,
-    prefrontal: ?prefrontal_mod.Prefrontal = null,
+    // prefrontal removed — unified into single agent turn
     hippocampus: ?hippocampus_mod.Hippocampus = null,
 
     mutex: std.Thread.Mutex,
@@ -148,11 +148,7 @@ pub const SessionManager = struct {
         log.info("amygdala enabled: model={s}", .{model_name});
     }
 
-    /// Enable the Prefrontal Cortex for deep async reasoning.
-    pub fn enablePrefrontal(self: *SessionManager, model_name: []const u8) void {
-        self.prefrontal = prefrontal_mod.Prefrontal.init(self.allocator, &self.provider, model_name);
-        log.info("prefrontal enabled: model={s}", .{model_name});
-    }
+    // prefrontal removed — no longer needed
 
     /// Enable the Hippocampus for memory consolidation.
     pub fn enableHippocampus(self: *SessionManager, model_name: []const u8) void {
@@ -463,29 +459,9 @@ pub const SessionManager = struct {
             // original text is what the user sees (the task instructions drive
             // the agent's tool-call loop).
             return injected;
-        } else if (thalamus_class == .complex) {
-            if (self.prefrontal) |*prefrontal| {
-                // Build ChatMessage slice from agent history for full context
-                const hist = session.agent.history.items;
-                const chat_msgs = try self.allocator.alloc(providers.ChatMessage, hist.len);
-                defer self.allocator.free(chat_msgs);
-                for (hist, 0..) |msg, i| {
-                    chat_msgs[i] = msg.toChatMessage();
-                }
-
-                var result = prefrontal.analyze(chat_msgs, content, response) catch null;
-                if (result) |*r| {
-                    defer r.deinit();
-                    if (r.analysis.len > 0) {
-                        const combined = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, r.analysis }) catch null;
-                        if (combined) |c| {
-                            self.allocator.free(response);
-                            return c;
-                        }
-                    }
-                }
-            }
         }
+        // Prefrontal split removed: single unified agent turn with Opus handles
+        // both simple and complex queries. No more stateless second-pass.
 
         // ── Hippocampus: Memory consolidation (fire-and-forget) ──────
         // Always consolidate except for high-confidence reflexes (greetings, acks)

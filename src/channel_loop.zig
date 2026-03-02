@@ -332,9 +332,7 @@ pub const ChannelRuntime = struct {
             self.session_mgr.enableRas();
             self.session_mgr.enableAmygdala(thalamus_model);
             self.session_mgr.enableHippocampus(thalamus_model);
-            if (config.getBrainArchPrefrontal()) |prefrontal_model| {
-                self.session_mgr.enablePrefrontal(prefrontal_model);
-            }
+            // prefrontal removed — unified into single agent turn with Opus
         }
 
         return self;
