@@ -200,6 +200,14 @@ pub const SessionManager = struct {
         agent.mem_rt = self.mem_rt;
         agent.memory_session_id = owned_key;
 
+        // Wire autonomy level → exec_security
+        if (self.config.autonomy.level == .full) {
+            agent.exec_security = .full;
+        } else if (self.config.autonomy.level == .read_only) {
+            agent.exec_security = .deny;
+        }
+        // .supervised keeps the default .allowlist
+
         session.* = .{
             .agent = agent,
             .created_at = std.time.timestamp(),
