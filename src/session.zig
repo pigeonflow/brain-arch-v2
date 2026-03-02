@@ -452,13 +452,13 @@ pub const SessionManager = struct {
                 \\3. Loop: agentfoundry_claim_next_task → do the work → agentfoundry_submit_task_result
                 \\4. Repeat until all tasks complete
             ;
-            // Inject as a system-level context message for the agent's next iteration
-            const injected = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, task_instructions });
-            self.allocator.free(response);
-            // The agent processes this combined response internally; only Broca's
-            // original text is what the user sees (the task instructions drive
-            // the agent's tool-call loop).
-            return injected;
+            // Inject task instructions into agent history as a system message
+            // so the agent sees them on the next turn. Don't leak to user.
+            try session.agent.history.append(self.allocator, .{
+                .role = .system,
+                .content = try self.allocator.dupe(u8, task_instructions),
+            });
+            return response;
         }
         // Prefrontal split removed: single unified agent turn with Opus handles
         // both simple and complex queries. No more stateless second-pass.
