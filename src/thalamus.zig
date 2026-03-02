@@ -114,8 +114,8 @@ pub const Thalamus = struct {
         \\{"class":"reflex|simple|complex|task|dangerous","reflex":"<immediate response or null>","routes":["broca"],"confidence":0.95}
         \\
         \\Classification rules:
-        \\- reflex: greetings, acks, "hey", "thanks", "ok", "nice", casual chat. Include a short natural reflex response.
-        \\- simple: factual questions, single-step requests, quick lookups. Routes to broca only.
+        \\- reflex: ONLY pure greetings and acks with no implicit question: "hey", "hi", "thanks", "ok", "bye", "good morning". NOT "so?", "and?", "well?", "go on" — those are follow-ups (simple).
+        \\- simple: factual questions, single-step requests, quick lookups, follow-ups like "so?", "and then?". Routes to broca only.
         \\- complex: strategy, planning, "think about", "should we", brainstorming. Routes to broca+prefrontal.
         \\- task: build/implement/refactor/create something multi-step. Needs plan+execute loop. Routes to broca+prefrontal+motor.
         \\- dangerous: delete, remove, post credentials, destructive commands. Routes to broca+amygdala.
@@ -163,7 +163,9 @@ pub const Thalamus = struct {
         }
 
         // ── Layer 0.5: Reflex cache lookup ──────────────────────────
-        if (self.cache_enabled) {
+        // Only cache pure greetings/acks — skip short ambiguous messages that need context
+        // (e.g., "So?", "And?", "Well?" are follow-ups, not greetings)
+        if (self.cache_enabled and message.len >= 4) {
             const cache_start = std.time.milliTimestamp();
             if (self.cacheGet(message)) |cached| {
                 const cache_dur = std.time.milliTimestamp() - cache_start;
