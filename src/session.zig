@@ -442,39 +442,45 @@ pub const SessionManager = struct {
         brain_events.emit(.broca_done, "{}");
 
         // ── Prefrontal: Deep async analysis for complex queries ──────
-        if (thalamus_class == .complex or thalamus_class == .task) {
+        // Skip prefrontal for task mode — Motor Cortex handles task execution.
+        // Prefrontal second-guessing mid-execution is counterproductive.
+        if (thalamus_class == .task) {
+            // For tasks: inject AgentFoundry loop instructions into the agent's
+            // next turn context (not user-visible). The agent will see these
+            // instructions and act on them.
+            const task_instructions =
+                \\[Motor Cortex — Task Mode Activated]
+                \\This is a multi-step task. Use the AgentFoundry tools to execute it:
+                \\1. Call agentfoundry_submit_plan with a plan summary, risks, and discrepancies
+                \\2. Call agentfoundry_add_tasks_and_start with ordered atomic tasks (each with verificationCommands)
+                \\3. Loop: agentfoundry_claim_next_task → do the work → agentfoundry_submit_task_result
+                \\4. Repeat until all tasks complete
+            ;
+            // Inject as a system-level context message for the agent's next iteration
+            const injected = try std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, task_instructions });
+            self.allocator.free(response);
+            // The agent processes this combined response internally; only Broca's
+            // original text is what the user sees (the task instructions drive
+            // the agent's tool-call loop).
+            return injected;
+        } else if (thalamus_class == .complex) {
             if (self.prefrontal) |*prefrontal| {
-                var result = prefrontal.analyze(content, response) catch null;
+                // Build ChatMessage slice from agent history for full context
+                const hist = session.agent.history.items;
+                const chat_msgs = try self.allocator.alloc(providers.ChatMessage, hist.len);
+                defer self.allocator.free(chat_msgs);
+                for (hist, 0..) |msg, i| {
+                    chat_msgs[i] = msg.toChatMessage();
+                }
+
+                var result = prefrontal.analyze(chat_msgs, content, response) catch null;
                 if (result) |*r| {
                     defer r.deinit();
                     if (r.analysis.len > 0) {
-                        if (thalamus_class == .task) {
-                            // For tasks: inject AgentFoundry loop instructions
-                            const task_instructions =
-                                \\
-                                \\
-                                \\[Motor Cortex — Task Mode Activated]
-                                \\This is a multi-step task. Use the AgentFoundry tools to execute it:
-                                \\1. Call agentfoundry_submit_plan with a plan summary, risks, and discrepancies
-                                \\2. Call agentfoundry_add_tasks_and_start with ordered atomic tasks (each with verificationCommands)
-                                \\3. Loop: agentfoundry_claim_next_task → do the work → agentfoundry_submit_task_result
-                                \\4. Repeat until all tasks complete
-                                \\
-                                \\Prefrontal Analysis:
-                                \\
-                            ;
-                            const combined = std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ response, task_instructions, r.analysis }) catch null;
-                            if (combined) |c| {
-                                self.allocator.free(response);
-                                return c;
-                            }
-                        } else {
-                            // Complex: append prefrontal analysis to response
-                            const combined = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, r.analysis }) catch null;
-                            if (combined) |c| {
-                                self.allocator.free(response);
-                                return c;
-                            }
+                        const combined = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, r.analysis }) catch null;
+                        if (combined) |c| {
+                            self.allocator.free(response);
+                            return c;
                         }
                     }
                 }

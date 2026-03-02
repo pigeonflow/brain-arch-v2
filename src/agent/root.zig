@@ -322,7 +322,7 @@ pub const Agent = struct {
             allocator.free(self.content);
         }
 
-        fn toChatMessage(self: *const OwnedMessage) ChatMessage {
+        pub fn toChatMessage(self: *const OwnedMessage) ChatMessage {
             return .{ .role = self.role, .content = self.content };
         }
     };

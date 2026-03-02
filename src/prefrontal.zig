@@ -47,18 +47,64 @@ pub const Prefrontal = struct {
         };
     }
 
-    /// Run deep analysis. Called with both the user message and Broca's response.
-    pub fn analyze(self: *Prefrontal, user_message: []const u8, broca_response: []const u8) !PrefrontalResult {
+    /// Run deep analysis. Called with conversation history and Broca's response.
+    /// `history` contains the full conversation context (system + user + assistant messages).
+    pub fn analyze(self: *Prefrontal, history: []const ChatMessage, user_message: []const u8, broca_response: []const u8) !PrefrontalResult {
         brain_events.emit(.prefrontal_start, "{}");
 
-        const context = try std.fmt.allocPrint(self.allocator, "User message: {s}\n\nBroca's quick response: {s}\n\nProvide deeper analysis if needed.", .{ user_message, broca_response });
+        // Build context string with recent conversation history
+        // Estimate buffer size: last 20 messages
+        const max_history = 20;
+        const start = if (history.len > max_history) history.len - max_history else 0;
+
+        // First pass: calculate total size needed
+        var total_len: usize = 0;
+        total_len += "Conversation history:\n".len;
+        for (history[start..]) |msg| {
+            if (msg.role == .system) continue;
+            const role_str = switch (msg.role) {
+                .user => "User",
+                .assistant => "Assistant",
+                else => "System",
+            };
+            total_len += role_str.len + 2 + msg.content.len + 1; // "Role: content\n"
+        }
+        const suffix = try std.fmt.allocPrint(self.allocator, "\nLatest user message: {s}\n\nBroca's quick response: {s}\n\nProvide deeper analysis if needed.", .{ user_message, broca_response });
+        defer self.allocator.free(suffix);
+        total_len += suffix.len;
+
+        // Second pass: build the string
+        const context = try self.allocator.alloc(u8, total_len);
+        var pos: usize = 0;
+        const header = "Conversation history:\n";
+        @memcpy(context[pos..][0..header.len], header);
+        pos += header.len;
+
+        for (history[start..]) |msg| {
+            if (msg.role == .system) continue;
+            const role_str = switch (msg.role) {
+                .user => "User",
+                .assistant => "Assistant",
+                else => "System",
+            };
+            @memcpy(context[pos..][0..role_str.len], role_str);
+            pos += role_str.len;
+            @memcpy(context[pos..][0..2], ": ");
+            pos += 2;
+            @memcpy(context[pos..][0..msg.content.len], msg.content);
+            pos += msg.content.len;
+            context[pos] = '\n';
+            pos += 1;
+        }
+        @memcpy(context[pos..][0..suffix.len], suffix);
+        pos += suffix.len;
         defer self.allocator.free(context);
 
         const messages = try self.allocator.alloc(ChatMessage, 2);
         defer self.allocator.free(messages);
 
         messages[0] = .{ .role = .system, .content = SYSTEM_PROMPT };
-        messages[1] = .{ .role = .user, .content = context };
+        messages[1] = .{ .role = .user, .content = context[0..pos] };
 
         const chat_response = try self.provider.chat(
             self.allocator,
