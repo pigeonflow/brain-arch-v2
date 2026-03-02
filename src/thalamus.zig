@@ -29,6 +29,8 @@ pub const SignalClass = enum {
     simple,
     /// Complex — needs reasoning, planning, multi-step execution.
     complex,
+    /// Task — long multi-step work: build, refactor, implement. Needs plan→execute loop.
+    task,
     /// Dangerous — destructive actions, credential exposure, safety concerns.
     dangerous,
     /// Interrupt — correction, "stop", "actually...", contradicts current work.
@@ -39,6 +41,7 @@ pub const SignalClass = enum {
             .reflex => "reflex",
             .simple => "simple",
             .complex => "complex",
+            .task => "task",
             .dangerous => "dangerous",
             .interrupt => "interrupt",
         };
@@ -48,6 +51,7 @@ pub const SignalClass = enum {
         if (std.mem.eql(u8, s, "reflex")) return .reflex;
         if (std.mem.eql(u8, s, "simple")) return .simple;
         if (std.mem.eql(u8, s, "complex")) return .complex;
+        if (std.mem.eql(u8, s, "task")) return .task;
         if (std.mem.eql(u8, s, "dangerous")) return .dangerous;
         if (std.mem.eql(u8, s, "interrupt")) return .interrupt;
         return null;
@@ -99,12 +103,13 @@ pub const Thalamus = struct {
     /// System prompt — intentionally tiny (~200 tokens). The thalamus doesn't think.
     const SYSTEM_PROMPT =
         \\You are a signal classifier. Given a user message, output ONLY a JSON object:
-        \\{"class":"reflex|simple|complex|dangerous","reflex":"<immediate response or null>","routes":["broca"],"confidence":0.95}
+        \\{"class":"reflex|simple|complex|task|dangerous","reflex":"<immediate response or null>","routes":["broca"],"confidence":0.95}
         \\
         \\Classification rules:
         \\- reflex: greetings, acks, "hey", "thanks", "ok", "nice", casual chat. Include a short natural reflex response.
         \\- simple: factual questions, single-step requests, quick lookups. Routes to broca only.
-        \\- complex: strategy, planning, multi-step, "think about", "should we", brainstorming. Routes to broca+prefrontal.
+        \\- complex: strategy, planning, "think about", "should we", brainstorming. Routes to broca+prefrontal.
+        \\- task: build/implement/refactor/create something multi-step. Needs plan+execute loop. Routes to broca+prefrontal+motor.
         \\- dangerous: delete, remove, post credentials, destructive commands. Routes to broca+amygdala.
         \\
         \\Route options: broca (always), prefrontal (deep reasoning), motor (code/files/commands), amygdala (safety gate), hippocampus (memory).

@@ -431,17 +431,39 @@ pub const SessionManager = struct {
         brain_events.emit(.broca_done, "{}");
 
         // ── Prefrontal: Deep async analysis for complex queries ──────
-        if (thalamus_class == .complex) {
+        if (thalamus_class == .complex or thalamus_class == .task) {
             if (self.prefrontal) |*prefrontal| {
                 var result = prefrontal.analyze(content, response) catch null;
                 if (result) |*r| {
                     defer r.deinit();
                     if (r.analysis.len > 0) {
-                        // Append prefrontal analysis to response
-                        const combined = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, r.analysis }) catch null;
-                        if (combined) |c| {
-                            self.allocator.free(response);
-                            return c;
+                        if (thalamus_class == .task) {
+                            // For tasks: inject AgentFoundry loop instructions
+                            const task_instructions =
+                                \\
+                                \\
+                                \\[Motor Cortex — Task Mode Activated]
+                                \\This is a multi-step task. Use the AgentFoundry tools to execute it:
+                                \\1. Call agentfoundry_submit_plan with a plan summary, risks, and discrepancies
+                                \\2. Call agentfoundry_add_tasks_and_start with ordered atomic tasks (each with verificationCommands)
+                                \\3. Loop: agentfoundry_claim_next_task → do the work → agentfoundry_submit_task_result
+                                \\4. Repeat until all tasks complete
+                                \\
+                                \\Prefrontal Analysis:
+                                \\
+                            ;
+                            const combined = std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ response, task_instructions, r.analysis }) catch null;
+                            if (combined) |c| {
+                                self.allocator.free(response);
+                                return c;
+                            }
+                        } else {
+                            // Complex: append prefrontal analysis to response
+                            const combined = std.fmt.allocPrint(self.allocator, "{s}\n\n{s}", .{ response, r.analysis }) catch null;
+                            if (combined) |c| {
+                                self.allocator.free(response);
+                                return c;
+                            }
                         }
                     }
                 }
@@ -449,7 +471,8 @@ pub const SessionManager = struct {
         }
 
         // ── Hippocampus: Memory consolidation (fire-and-forget) ──────
-        if (thalamus_class != .reflex) {
+        // Always consolidate except for high-confidence reflexes (greetings, acks)
+        {
             if (self.hippocampus) |*hippo| {
                 const content_copy = self.allocator.dupe(u8, content) catch null;
                 const response_copy = self.allocator.dupe(u8, response) catch null;

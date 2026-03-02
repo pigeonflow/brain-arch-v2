@@ -130,11 +130,19 @@ pub const Hippocampus = struct {
     }
 
     fn storeMemories(self: *Hippocampus, response: []const u8) usize {
-        // Parse memories from JSON response
-        const start = std.mem.indexOf(u8, response, "\"memories\":[") orelse return 0;
-        const arr_start = start + "\"memories\":[".len;
-        const arr_end = std.mem.indexOfPos(u8, response, arr_start, "]") orelse return 0;
-        const arr = response[arr_start..arr_end];
+        const hlog = std.log.scoped(.hippocampus);
+        // Parse memories from JSON response — try both with and without space
+        const needle1 = "\"memories\":[";
+        const needle2 = "\"memories\": [";
+        const start = std.mem.indexOf(u8, response, needle1) orelse
+            std.mem.indexOf(u8, response, needle2) orelse {
+            hlog.warn("no 'memories' array found in response (len={d}): {s}", .{ response.len, response[0..@min(response.len, 200)] });
+            return 0;
+        };
+        // Find the '[' after "memories":
+        const arr_start = std.mem.indexOfPos(u8, response, start, "[") orelse return 0;
+        const arr_end = std.mem.indexOfPos(u8, response, arr_start + 1, "]") orelse return 0;
+        const arr = response[arr_start + 1 .. arr_end];
 
         var count: usize = 0;
 
@@ -156,12 +164,8 @@ pub const Hippocampus = struct {
             const mem_type = extractJsonString(obj, "type") orelse "episodic";
             const priority = extractJsonFloat(obj, "priority") orelse 0.5;
 
-            // Generate simple hash embedding for the text
-            var embedding: [64]f32 = undefined;
-            hashEmbed(text, &embedding);
-
-            // Call clawmem upsert
-            self.callClawmemUpsert(text, mem_type, priority, &embedding) catch {
+            // Call clawmem upsert (clawmem auto-embeds from content text)
+            self.callClawmemUpsert(text, mem_type, priority) catch {
                 pos = obj_end + 1;
                 continue;
             };
@@ -172,29 +176,40 @@ pub const Hippocampus = struct {
         return count;
     }
 
-    fn callClawmemUpsert(self: *Hippocampus, text: []const u8, mem_type: []const u8, priority: f64, embedding: []const f32) !void {
-        // Build JSON input for clawmem
-        var json_buf: [4096]u8 = undefined;
-
-        // Build embedding array string
-        var emb_buf: [2048]u8 = undefined;
-        var emb_pos: usize = 0;
-        emb_buf[emb_pos] = '[';
-        emb_pos += 1;
-        for (embedding, 0..) |val, i| {
-            if (i > 0) {
-                emb_buf[emb_pos] = ',';
-                emb_pos += 1;
+    fn callClawmemUpsert(self: *Hippocampus, text: []const u8, mem_type: []const u8, priority: f64) !void {
+        // Build JSON input for clawmem (no embedding — clawmem auto-embeds from content)
+        // Escape text for JSON safety (replace " with \", newlines with spaces)
+        var escaped_buf: [2048]u8 = undefined;
+        var esc_len: usize = 0;
+        for (text) |c| {
+            if (esc_len >= escaped_buf.len - 2) break;
+            if (c == '"') {
+                escaped_buf[esc_len] = '\\';
+                esc_len += 1;
+                escaped_buf[esc_len] = '"';
+                esc_len += 1;
+            } else if (c == '\\') {
+                escaped_buf[esc_len] = '\\';
+                esc_len += 1;
+                escaped_buf[esc_len] = '\\';
+                esc_len += 1;
+            } else if (c == '\n') {
+                escaped_buf[esc_len] = ' ';
+                esc_len += 1;
+            } else {
+                escaped_buf[esc_len] = c;
+                esc_len += 1;
             }
-            const printed = std.fmt.bufPrint(emb_buf[emb_pos..], "{d:.6}", .{val}) catch break;
-            emb_pos += printed.len;
         }
-        emb_buf[emb_pos] = ']';
-        emb_pos += 1;
+        const escaped_text = escaped_buf[0..esc_len];
 
+        var json_buf: [4096]u8 = undefined;
         const json = std.fmt.bufPrint(&json_buf,
-            \\{{"type":"{s}","content":"{s}","embedding":{s},"priority":{d:.2}}}
-        , .{ mem_type, text, emb_buf[0..emb_pos], priority }) catch return error.BufferTooSmall;
+            \\{{"type":"{s}","content":"{s}","priority":{d:.2}}}
+        , .{ mem_type, escaped_text, priority }) catch return error.BufferTooSmall;
+
+        const hlog = std.log.scoped(.hippocampus);
+        hlog.info("clawmem upsert: bin={s} db={s} json_len={d}", .{ self.clawmem_bin, self.clawmem_db, json.len });
 
         // Shell out to clawmem
         var child = std.process.Child.init(
@@ -213,7 +228,19 @@ pub const Hippocampus = struct {
             child.stdin = null;
         }
 
-        _ = child.wait() catch {};
+        // Read stderr for error logging
+        var stderr_buf: [1024]u8 = undefined;
+        var stderr_len: usize = 0;
+        if (child.stderr) |stderr| {
+            stderr_len = stderr.read(&stderr_buf) catch 0;
+        }
+
+        const term = child.wait() catch {
+            return;
+        };
+        if (term.Exited != 0) {
+            hlog.warn("clawmem upsert failed (exit={d}): {s}", .{ term.Exited, stderr_buf[0..stderr_len] });
+        }
     }
 
     // ---- READ PATH: Retrieval ----
@@ -222,12 +249,8 @@ pub const Hippocampus = struct {
     pub fn retrieve(self: *Hippocampus, user_message: []const u8) ?[]const u8 {
         brain_events.emit(.hippocampus_start, "{\"phase\":\"retrieve\"}");
 
-        // Generate hash embedding for the query
-        var query_emb: [64]f32 = undefined;
-        hashEmbed(user_message, &query_emb);
-
-        // Call clawmem search
-        const results = self.callClawmemSearch(&query_emb, 5) catch {
+        // Call clawmem search with query text (clawmem auto-embeds)
+        const results = self.callClawmemSearch(user_message, 5) catch {
             
             brain_events.emit(.hippocampus_done, "{\"retrieved\":0}");
             return null;
@@ -256,26 +279,11 @@ pub const Hippocampus = struct {
         return formatted;
     }
 
-    fn callClawmemSearch(self: *Hippocampus, embedding: []const f32, k: usize) ![]const u8 {
-        var emb_buf: [2048]u8 = undefined;
-        var emb_pos: usize = 0;
-        emb_buf[emb_pos] = '[';
-        emb_pos += 1;
-        for (embedding, 0..) |val, i| {
-            if (i > 0) {
-                emb_buf[emb_pos] = ',';
-                emb_pos += 1;
-            }
-            const printed = std.fmt.bufPrint(emb_buf[emb_pos..], "{d:.6}", .{val}) catch break;
-            emb_pos += printed.len;
-        }
-        emb_buf[emb_pos] = ']';
-        emb_pos += 1;
-
-        var json_buf: [2560]u8 = undefined;
+    fn callClawmemSearch(self: *Hippocampus, query_text: []const u8, k: usize) ![]const u8 {
+        var json_buf: [4096]u8 = undefined;
         const json = std.fmt.bufPrint(&json_buf,
-            \\{{"query_embedding":{s},"k":{d}}}
-        , .{ emb_buf[0..emb_pos], k }) catch return error.BufferTooSmall;
+            \\{{"query":"{s}","k":{d}}}
+        , .{ query_text, k }) catch return error.BufferTooSmall;
 
         var child = std.process.Child.init(
             &[_][]const u8{ self.clawmem_bin, "--db", self.clawmem_db, "search", "--agent", self.agent_id },
@@ -373,32 +381,6 @@ pub const Hippocampus = struct {
             _ = file.write("\n") catch {};
             pos = std.mem.indexOfPos(u8, response, pos + 1, "\"text\"") orelse break;
             pos += 1;
-        }
-    }
-
-    // ---- Utilities ----
-
-    /// Simple hash-based embedding. Not semantic — just deterministic projection.
-    /// Replace with real embedding model in v0.2.
-    fn hashEmbed(text: []const u8, out: []f32) void {
-        // Use multiple hash seeds to project text into a fixed-dim vector
-        for (out, 0..) |*slot, i| {
-            var h: u64 = 0xcbf29ce484222325; // FNV-1a
-            h ^= @as(u64, @intCast(i));
-            h *%= 0x100000001b3;
-            for (text) |c| {
-                h ^= @as(u64, c);
-                h *%= 0x100000001b3;
-            }
-            // Map to [-1, 1]
-            slot.* = @as(f32, @floatFromInt(@as(i32, @intCast(h & 0x7FFFFFFF)))) / 2147483647.0 * 2.0 - 1.0;
-        }
-        // Normalize
-        var norm: f32 = 0;
-        for (out) |v| norm += v * v;
-        norm = @sqrt(norm);
-        if (norm > 1e-8) {
-            for (out) |*v| v.* /= norm;
         }
     }
 };
