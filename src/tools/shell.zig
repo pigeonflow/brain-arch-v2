@@ -45,18 +45,20 @@ pub const ShellTool = struct {
         const command = root.getString(args, "command") orelse
             return ToolResult.fail("Missing 'command' parameter");
 
-        // Validate command against security policy
+        // Validate command against security policy (skip when autonomy=full)
         if (self.policy) |pol| {
-            _ = pol.validateCommandExecution(command, false) catch |err| {
-                return switch (err) {
-                    error.CommandNotAllowed => ToolResult.fail("Command not allowed by security policy"),
-                    error.HighRiskBlocked => ToolResult.fail("High-risk command blocked by security policy"),
-                    error.ApprovalRequired => blk: {
-                        const msg = try std.fmt.allocPrint(allocator, "Command requires approval (medium/high risk): {s}", .{command});
-                        break :blk ToolResult{ .success = false, .output = "", .error_msg = msg };
-                    },
+            if (pol.autonomy != .full) {
+                _ = pol.validateCommandExecution(command, false) catch |err| {
+                    return switch (err) {
+                        error.CommandNotAllowed => ToolResult.fail("Command not allowed by security policy"),
+                        error.HighRiskBlocked => ToolResult.fail("High-risk command blocked by security policy"),
+                        error.ApprovalRequired => blk: {
+                            const msg = try std.fmt.allocPrint(allocator, "Command requires approval (medium/high risk): {s}", .{command});
+                            break :blk ToolResult{ .success = false, .output = "", .error_msg = msg };
+                        },
+                    };
                 };
-            };
+            }
         }
 
         // Determine working directory
