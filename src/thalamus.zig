@@ -99,6 +99,14 @@ pub const Thalamus = struct {
     provider: *Provider,
     model_name: []const u8,
     enabled: bool,
+    clawmem_bin: []const u8,
+    clawmem_db: []const u8,
+    cache_enabled: bool,
+
+    /// Cache hit threshold — cosine similarity above this returns cached reflex
+    const CACHE_THRESHOLD: f32 = 0.92;
+    /// Segment name for reflex cache in ClawMem
+    const CACHE_SEGMENT = "reflex_cache";
 
     /// System prompt — intentionally tiny (~200 tokens). The thalamus doesn't think.
     const SYSTEM_PROMPT =
@@ -124,11 +132,22 @@ pub const Thalamus = struct {
             .provider = provider,
             .model_name = model_name,
             .enabled = enabled,
+            .clawmem_bin = "",
+            .clawmem_db = "",
+            .cache_enabled = false,
         };
     }
 
+    /// Enable the reflex cache with clawmem paths derived from workspace dir
+    pub fn enableCache(self: *Thalamus, workspace_dir: []const u8) void {
+        self.clawmem_bin = std.fmt.allocPrint(self.allocator, "{s}/../bin/clawmem", .{workspace_dir}) catch return;
+        self.clawmem_db = std.fmt.allocPrint(self.allocator, "{s}/clawmem.db", .{workspace_dir}) catch return;
+        self.cache_enabled = true;
+        log.info("thalamus reflex cache enabled: bin={s} db={s}", .{ self.clawmem_bin, self.clawmem_db });
+    }
+
     /// Classify an incoming message. Returns classification with optional reflex response.
-    /// This should complete in <500ms with a fast model (Haiku-class).
+    /// Checks reflex cache first (sub-100ms), falls back to model (~800ms).
     pub fn classify(self: *Thalamus, message: []const u8) !Classification {
         if (!self.enabled) {
             // Thalamus disabled — default to simple, route to broca only
@@ -141,6 +160,25 @@ pub const Thalamus = struct {
                 .confidence = 0.5,
                 .raw_response = try self.allocator.dupe(u8, "disabled"),
             };
+        }
+
+        // ── Layer 0.5: Reflex cache lookup ──────────────────────────
+        if (self.cache_enabled) {
+            const cache_start = std.time.milliTimestamp();
+            if (self.cacheGet(message)) |cached| {
+                const cache_dur = std.time.milliTimestamp() - cache_start;
+                log.info("thalamus CACHE HIT: {d}ms response=\"{s}\"", .{ cache_dur, cached.response });
+
+                const routes = try self.allocator.alloc(Route, 1);
+                routes[0] = .broca;
+                return Classification{
+                    .class = .reflex,
+                    .reflex_response = try self.allocator.dupe(u8, cached.response),
+                    .routes = routes,
+                    .confidence = cached.score,
+                    .raw_response = try self.allocator.dupe(u8, "cache_hit"),
+                };
+            }
         }
 
         const timer_start = std.time.milliTimestamp();
@@ -170,7 +208,168 @@ pub const Thalamus = struct {
         log.info("thalamus classify: {d}ms model={s}", .{ duration, self.model_name });
 
         // Parse the JSON response
-        return self.parseResponse(response.content orelse "{}");
+        const result = try self.parseResponse(response.content orelse "{}");
+
+        // ── Cache write: store reflex responses for future instant retrieval ──
+        if (self.cache_enabled and result.class == .reflex and result.reflex_response != null and result.confidence >= 0.85) {
+            self.cachePut(message, result.reflex_response.?) catch {};
+        }
+
+        return result;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Reflex Cache — ClawMem-backed semantic cache
+    // ═══════════════════════════════════════════════════════════════════
+
+    const CacheHit = struct {
+        response: []const u8,
+        score: f32,
+    };
+
+    /// Search ClawMem for a cached reflex response matching this message.
+    /// Returns null on miss or error (cache is best-effort).
+    fn cacheGet(self: *Thalamus, message: []const u8) ?CacheHit {
+        // Build JSON: {"query":"<message>","segment":"reflex_cache","top_k":1}
+        var json_buf: [4096]u8 = undefined;
+        const escaped_msg = self.jsonEscape(message) catch return null;
+        defer self.allocator.free(escaped_msg);
+        const json = std.fmt.bufPrint(&json_buf, "{{\"query\":\"{s}\",\"segment\":\"{s}\",\"top_k\":1}}", .{ escaped_msg, CACHE_SEGMENT }) catch return null;
+
+        // Spawn clawmem search, pipe JSON to stdin
+        var child = std.process.Child.init(
+            &[_][]const u8{ self.clawmem_bin, "--db", self.clawmem_db, "search", "--agent", "thalamus" },
+            self.allocator,
+        );
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        child.spawn() catch return null;
+
+        // Write query JSON to stdin
+        if (child.stdin) |stdin| {
+            stdin.writeAll(json) catch {};
+            stdin.close();
+            child.stdin = null;
+        }
+
+        // Read stdout
+        var stdout_buf: [8192]u8 = undefined;
+        const stdout_len = if (child.stdout) |stdout| stdout.readAll(&stdout_buf) catch 0 else 0;
+        _ = child.wait() catch {};
+
+        if (stdout_len == 0) return null;
+        const output = stdout_buf[0..stdout_len];
+
+        // Parse response — look for score and content
+        // ClawMem search output format: {"results":[{"id":"...","content":"...","score":0.95,...}]}
+        return self.parseCacheResponse(output);
+    }
+
+    fn parseCacheResponse(self: *Thalamus, output: []const u8) ?CacheHit {
+        // ClawMem outputs a JSON array: [{"id":"...","score":0.95,"content":"..."}]
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, output, .{}) catch return null;
+        defer parsed.deinit();
+
+        if (parsed.value != .array or parsed.value.array.items.len == 0) return null;
+
+        const first = parsed.value.array.items[0];
+        if (first != .object) return null;
+
+        const score_val = first.object.get("score") orelse return null;
+        const score: f32 = switch (score_val) {
+            .float => @floatCast(score_val.float),
+            .integer => @floatFromInt(score_val.integer),
+            else => return null,
+        };
+
+        if (score < CACHE_THRESHOLD) return null;
+
+        // The "tags" field stores the cached reflex response
+        const tags_val = first.object.get("tags") orelse return null;
+        const response_str = switch (tags_val) {
+            .string => tags_val.string,
+            else => return null,
+        };
+        if (response_str.len == 0) return null;
+
+        return CacheHit{
+            .response = self.allocator.dupe(u8, response_str) catch return null,
+            .score = score,
+        };
+    }
+
+    /// Store a reflex response in the cache. Fire-and-forget.
+    /// Content = input message (cache key), meta.response = reflex response (cache value)
+    fn cachePut(self: *Thalamus, message: []const u8, response: []const u8) !void {
+        const escaped_msg = try self.jsonEscape(message);
+        defer self.allocator.free(escaped_msg);
+        const escaped_resp = try self.jsonEscape(response);
+        defer self.allocator.free(escaped_resp);
+
+        // Store input as content (this is what we embed and search against)
+        // Store response in tags (returned in search results)
+        const json = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"content\":\"{s}\",\"segment\":\"{s}\",\"tags\":\"{s}\"}}",
+            .{ escaped_msg, CACHE_SEGMENT, escaped_resp },
+        );
+        defer self.allocator.free(json);
+
+        log.info("thalamus cache PUT: query=\"{s}\" response=\"{s}\"", .{ message, response });
+
+        // Fire-and-forget: spawn clawmem upsert in background
+        var child = std.process.Child.init(
+            &[_][]const u8{ self.clawmem_bin, "--db", self.clawmem_db, "upsert", "--agent", "thalamus" },
+            self.allocator,
+        );
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        child.spawn() catch |e| {
+            log.err("thalamus cache PUT spawn failed: {}", .{e});
+            return;
+        };
+
+        if (child.stdin) |stdin| {
+            _ = stdin.write(json) catch {};
+            stdin.close();
+            child.stdin = null;
+        }
+
+        // Read stderr for debugging
+        var stderr_buf: [2048]u8 = undefined;
+        const stderr_len = if (child.stderr) |stderr| stderr.readAll(&stderr_buf) catch 0 else 0;
+        var stdout_buf: [2048]u8 = undefined;
+        const stdout_len = if (child.stdout) |stdout| stdout.readAll(&stdout_buf) catch 0 else 0;
+
+        const term = child.wait() catch |e| {
+            log.err("thalamus cache PUT wait failed: {}", .{e});
+            return;
+        };
+
+        if (term.Exited != 0) {
+            log.err("thalamus cache PUT failed (exit={d}): stderr={s} stdout={s}", .{ term.Exited, stderr_buf[0..stderr_len], stdout_buf[0..stdout_len] });
+        } else {
+            log.info("thalamus cache PUT success: stdout={s}", .{stdout_buf[0..stdout_len]});
+        }
+    }
+
+    fn jsonEscape(self: *Thalamus, input: []const u8) ![]const u8 {
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        for (input) |c| {
+            switch (c) {
+                '"' => try buf.appendSlice(self.allocator, "\\\""),
+                '\\' => try buf.appendSlice(self.allocator, "\\\\"),
+                '\n' => try buf.appendSlice(self.allocator, "\\n"),
+                '\r' => try buf.appendSlice(self.allocator, "\\r"),
+                '\t' => try buf.appendSlice(self.allocator, "\\t"),
+                else => try buf.append(self.allocator, c),
+            }
+        }
+        return try buf.toOwnedSlice(self.allocator);
     }
 
     fn parseResponse(self: *Thalamus, raw: []const u8) !Classification {

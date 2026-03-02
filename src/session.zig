@@ -132,6 +132,7 @@ pub const SessionManager = struct {
     /// Uses the same provider as the main agent but with a fast/cheap model.
     pub fn enableThalamus(self: *SessionManager, model_name: []const u8) void {
         self.thalamus = Thalamus.init(self.allocator, &self.provider, model_name, true);
+        self.thalamus.?.enableCache(self.config.workspace_dir);
         log.info("thalamus enabled: model={s}", .{model_name});
     }
 
@@ -362,8 +363,10 @@ pub const SessionManager = struct {
                         if (stream_sink) |sink| {
                             sink.callback(sink.ctx, .{ .stage = .chunk, .text = reflex });
                         }
-                        // If reflex-only and high confidence, we could skip the full turn.
-                        // For now, always continue to the agent for potential enrichment.
+                        // High-confidence reflex: skip Broca entirely (sub-second response)
+                        if (cls.confidence >= 0.90) {
+                            return try self.allocator.dupe(u8, reflex);
+                        }
                     }
 
                     // Format classification header for the agent
